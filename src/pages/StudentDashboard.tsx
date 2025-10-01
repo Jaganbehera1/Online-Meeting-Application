@@ -5,12 +5,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { Label } from '@/components/ui/label';
 import { collection, query, onSnapshot, orderBy, where, Timestamp, limit, addDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { Class, QuizResponse } from '@/types';
-import { LogOut, Video, Calendar, BookOpen, Trophy, Users, Clock, Play, BarChart, Award, Monitor, Eye } from 'lucide-react';
+import { LogOut, Video, Calendar, BookOpen, Trophy, Users, Clock, Play, Award, Monitor, Eye } from 'lucide-react';
 import { toast } from 'sonner';
 import { format, isAfter, isBefore } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
@@ -178,11 +176,7 @@ export function StudentDashboard() {
     isAfter(c.scheduledAt, now)
   );
   const pastClasses = classes.filter(c => c.status === 'completed');
-  const missedClasses = classes.filter(c => 
-    c.status === 'scheduled' && 
-    c.scheduledAt && 
-    isBefore(c.scheduledAt, now)
-  );
+  // Removed unused missedClasses variable
 
   // Quiz statistics
   const totalQuizzes = quizResults.length;

@@ -2,18 +2,17 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Badge } from '@/components/ui/badge';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { 
   doc, 
-  getDoc, 
   collection, 
   addDoc, 
   query, 
@@ -23,8 +22,7 @@ import {
   Timestamp, 
   getDocs, 
   limit,
-  orderBy,
-  deleteDoc
+  orderBy
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { Class, Quiz, QuizResponse, StudentAttendance } from '@/types';
@@ -35,10 +33,8 @@ import {
   MicOff, 
   ScreenShare, 
   ScreenShareOff,
-  Share2, 
   Users,
   MessageSquare,
-  Settings,
   Award,
   CheckCircle2,
   XCircle,
@@ -74,8 +70,8 @@ class EnhancedScreenShare {
           sampleRate: 44100,
           channelCount: 2
         },
-        surfaceSwitching: 'include',
-        selfBrowserSurface: 'exclude'
+        // surfaceSwitching: 'include',
+        // selfBrowserSurface: 'exclude'
       });
 
       this.isSharing = true;
@@ -246,7 +242,6 @@ export function ClassRoom() {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const screenShareInstance = useRef(new EnhancedScreenShare());
-  const [studentResponses, setStudentResponses] = useState<{[quizId: string]: number}>({});
   const [newQuiz, setNewQuiz] = useState({
     question: '',
     option1: '',
@@ -451,7 +446,6 @@ export function ClassRoom() {
     };
   }, [classData?.id, isTeacher, dismissedQuizzes]);
 
-  // Listen for quiz responses
   // Listen for quiz responses - UPDATED FOR TEACHER VIEW
   useEffect(() => {
     if (!activeQuiz) return;
@@ -479,10 +473,6 @@ export function ClassRoom() {
         if (!isTeacher && currentUser && responses.length > 0) {
           const studentResponse = responses.find(r => r.studentId === currentUser.uid);
           if (studentResponse) {
-            setStudentResponses(prev => ({
-              ...prev,
-              [activeQuiz.id]: studentResponse.selectedOption
-            }));
             setHasSubmitted(true);
             setSelectedOption(studentResponse.selectedOption);
           }
@@ -918,7 +908,7 @@ export function ClassRoom() {
   const totalResponses = quizResponses.length;
   const accuracy = totalResponses > 0 ? Math.round((correctCount / totalResponses) * 100) : 0;
 
-  const hasActiveQuizForStudent = !isTeacher && activeQuiz && !dismissedQuizzes.has(activeQuiz.id);
+  // const hasActiveQuizForStudent = !isTeacher && activeQuiz && !dismissedQuizzes.has(activeQuiz.id);
   const canReopenQuiz = !isTeacher && activeQuiz && dismissedQuizzes.has(activeQuiz.id) && !hasSubmitted;
 
   if (loading) {

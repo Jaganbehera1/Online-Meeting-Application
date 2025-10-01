@@ -22,7 +22,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { Class, StudentAttendance } from '@/types';
-import { LogOut, Plus, Video, Calendar, Users, BarChart, Clock, Play, Edit3, Trash2, User, Eye, EyeOff, Share2, Monitor } from 'lucide-react';
+import { LogOut, Plus, Video, Calendar, Users, BarChart, Clock, Play, Trash2, User, Eye, EyeOff, Share2, Monitor } from 'lucide-react';
 import { toast } from 'sonner';
 import { format, isAfter, isBefore } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
@@ -269,12 +269,7 @@ export function TeacherDashboard() {
     isAfter(c.scheduledAt, now)
   );
   const completedClasses = classes.filter(c => c.status === 'completed');
-  const cancelledClasses = classes.filter(c => c.status === 'cancelled');
-  const missedClasses = classes.filter(c => 
-    c.status === 'scheduled' && 
-    c.scheduledAt && 
-    isBefore(c.scheduledAt, now)
-  );
+  // Removed unused cancelledClasses and missedClasses variables
 
   const getClassStatus = (classItem: Class) => {
     if (classItem.status === 'live') return 'live';
@@ -696,7 +691,7 @@ export function TeacherDashboard() {
                             {isExpanded && (
                               students.length > 0 ? (
                                 <div className="grid gap-2">
-                                  {students.map((student, index) => (
+                                  {students.map((student) => (
                                     <div
                                       key={student.id}
                                       className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border"
