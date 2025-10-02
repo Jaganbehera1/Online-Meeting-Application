@@ -157,43 +157,49 @@ export class WebRTCManager {
     }
   }
 
-  async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promise<void> {
-    console.log('Handling answer from:', studentId);
-    const peerConnection = this.peerConnections.get(studentId);
-    
-    if (!peerConnection) {
-      console.error('No peer connection found for:', studentId);
-      throw new Error('No peer connection found');
-    }
+// In WebRTCManager.ts - Update the handleAnswer method
+async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promise<void> {
+  console.log('Handling answer from:', studentId);
+  const peerConnection = this.peerConnections.get(studentId);
+  
+  if (!peerConnection) {
+    console.error('No peer connection found for:', studentId);
+    throw new Error('No peer connection found');
+  }
 
-    // Check if we're in the right state to handle an answer
-    if (peerConnection.signalingState !== 'have-local-offer') {
-      console.warn(`Wrong signaling state for answer: ${peerConnection.signalingState}, expected: have-local-offer`);
+  // Check if we're in the right state to handle an answer
+  if (peerConnection.signalingState !== 'have-local-offer') {
+    console.warn(`Wrong signaling state for answer: ${peerConnection.signalingState}, expected: have-local-offer. Skipping duplicate answer.`);
+    return; // Just return silently for duplicate answers
+  }
+
+  try {
+    await peerConnection.setRemoteDescription(answer);
+    console.log('Answer set as remote description successfully');
+
+    // Process any pending ICE candidates
+    const pending = this.pendingCandidates.get(studentId) || [];
+    if (pending.length > 0) {
+      console.log(`Processing ${pending.length} pending ICE candidates for:`, studentId);
+      for (const candidate of pending) {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (error) {
+          console.error('Error adding pending ICE candidate:', error);
+        }
+      }
+      this.pendingCandidates.set(studentId, []);
+    }
+  } catch (error) {
+    console.error('Error handling answer:', error);
+    // Don't throw for duplicate answers, just log
+    if ((error as Error).name === 'InvalidStateError') {
+      console.warn('Duplicate answer received, ignoring...');
       return;
     }
-
-    try {
-      await peerConnection.setRemoteDescription(answer);
-      console.log('Answer set as remote description successfully');
-
-      // Process any pending ICE candidates
-      const pending = this.pendingCandidates.get(studentId) || [];
-      if (pending.length > 0) {
-        console.log(`Processing ${pending.length} pending ICE candidates for:`, studentId);
-        for (const candidate of pending) {
-          try {
-            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-          } catch (error) {
-            console.error('Error adding pending ICE candidate:', error);
-          }
-        }
-        this.pendingCandidates.set(studentId, []);
-      }
-    } catch (error) {
-      console.error('Error handling answer:', error);
-      throw error;
-    }
+    throw error;
   }
+}
 
   async handleOffer(studentId: string, offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
     console.log('Handling offer from:', studentId);

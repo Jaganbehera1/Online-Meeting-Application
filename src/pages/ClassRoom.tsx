@@ -412,6 +412,7 @@ export function ClassRoom() {
   }, [classData?.id, currentUser, isTeacher]);
 
 // Handle WebRTC signaling messages
+// In ClassRoom.tsx - Update the handleSignalingMessage function
 const handleSignalingMessage = async (signal: any) => {
   try {
     // Skip if this is our own signal
@@ -470,8 +471,8 @@ const handleSignalingMessage = async (signal: any) => {
           // Check connection state before handling answer
           const signalingState = webRTCManager.getSignalingState(processedSignal.fromUserId);
           if (signalingState !== 'have-local-offer') {
-            console.warn(`Cannot handle answer in state: ${signalingState}, expected: have-local-offer`);
-            return;
+            console.warn(`Cannot handle answer in state: ${signalingState}, expected: have-local-offer. This is likely a duplicate.`);
+            return; // Silently ignore duplicate answers
           }
           
           await webRTCManager.handleAnswer(processedSignal.fromUserId, processedSignal.answer);
@@ -499,6 +500,10 @@ const handleSignalingMessage = async (signal: any) => {
     }
   } catch (error) {
     console.error('Error handling signaling message:', error);
+    // Don't show error toast for duplicate messages
+    if (!(error as Error).message?.includes('duplicate') && !(error as Error).name?.includes('InvalidState')) {
+      toast.error('Failed to process connection message');
+    }
   }
 };
 
@@ -518,14 +523,26 @@ const handleSignalingMessage = async (signal: any) => {
     }
   };
 
-// Initiate connection with student (teacher only)
+// In ClassRoom.tsx - Update initiateConnectionWithStudent
 const initiateConnectionWithStudent = async (studentId: string) => {
   if (!isTeacher || !currentUser) return;
 
-  // Check if we already have a connection
+  // Check if we already have a connection and it's in a valid state
   if (webRTCManager.hasConnection(studentId)) {
-    console.log('Already have connection with student:', studentId);
-    return;
+    const signalingState = webRTCManager.getSignalingState(studentId);
+    console.log('Already have connection with student:', studentId, 'state:', signalingState);
+    
+    // If connection is stable or connected, don't create a new one
+    if (signalingState === 'stable' || signalingState === 'connected') {
+      console.log('Connection already established with student:', studentId);
+      return;
+    }
+    
+    // If connection is in a bad state, close it first
+    if (signalingState === 'closed' || signalingState === 'failed') {
+      console.log('Closing bad connection with student:', studentId);
+      webRTCManager.closeConnection(studentId);
+    }
   }
 
   try {
@@ -656,13 +673,14 @@ useEffect(() => {
   }
 }, [isTeacher]);
 
-// WebRTC Signaling Listener with duplicate prevention
+// In ClassRoom.tsx - Update the WebRTC Signaling Listener
 useEffect(() => {
   if (!classData?.id || !currentUser) return;
 
   console.log('Setting up WebRTC signaling listener for class:', classData.id);
 
   const processedSignalIds = new Set<string>();
+  const recentSignals = new Map(); // Track recent signals by type and fromUserId
 
   const signalingQuery = query(
     collection(db, 'webrtcSignals'),
@@ -684,6 +702,18 @@ useEffect(() => {
             continue;
           }
           processedSignalIds.add(signalId);
+          
+          // Create a unique key for this type of signal to prevent duplicates
+          const signalKey = `${signal.type}-${signal.fromUserId}`;
+          const now = Date.now();
+          const lastSignalTime = recentSignals.get(signalKey) || 0;
+          
+          // Prevent processing the same signal type from the same user within 2 seconds
+          if (now - lastSignalTime < 2000) {
+            console.log('Skipping duplicate signal:', signalKey);
+            continue;
+          }
+          recentSignals.set(signalKey, now);
           
           console.log('Received WebRTC signal:', signal.type, 'from:', signal.fromUserId);
           await handleSignalingMessage(signal);
