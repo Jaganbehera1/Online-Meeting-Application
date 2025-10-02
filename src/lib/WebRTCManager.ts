@@ -264,7 +264,7 @@ export class WebRTCManager {
 
   closeAllConnections(): void {
     console.log('Closing all peer connections');
-    this.peerConnections.forEach((connection, studentId) => {
+    this.peerConnections.forEach((connection) => {
       connection.close();
     });
     this.peerConnections.clear();

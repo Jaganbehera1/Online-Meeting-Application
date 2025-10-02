@@ -275,7 +275,7 @@ export function ClassRoom() {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const screenShareRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const screenShareInstance = useRef(new EnhancedScreenShare());
 
@@ -1345,11 +1345,6 @@ useEffect(() => {
   const accuracy = totalResponses > 0 ? Math.round((correctCount / totalResponses) * 100) : 0;
 
   const canReopenQuiz = !isTeacher && activeQuiz && dismissedQuizzes.has(activeQuiz.id) && !hasSubmitted;
-
-  // Get connection status for a student
-  const getConnectionStatus = (studentId: string) => {
-    return activeConnections.has(studentId) ? 'connected' : 'disconnected';
-  };
 
   if (loading) {
     return (
