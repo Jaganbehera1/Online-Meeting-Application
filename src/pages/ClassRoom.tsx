@@ -255,27 +255,26 @@ export function ClassRoom() {
   const [webRTCManager] = useState(new WebRTCManager());
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [activeConnections, setActiveConnections] = useState<Set<string>>(new Set());
-  const [isWebRTCInitialized, setIsWebRTCInitialized] = useState(false);
 
   // Quiz states
   const [showQuizDialog, setShowQuizDialog] = useState(false);
   const [showQuizResponseDialog, setShowQuizResponseDialog] = useState(false);
   const [showResultsDialog, setShowResultsDialog] = useState(false);
-  const [activeQuiz, setActiveQuiz] = useState<Quiz | null>(null);
+  const [activeQuiz, _setActiveQuiz] = useState<Quiz | null>(null);
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
   const [hasSubmitted, setHasSubmitted] = useState(false);
-  const [quizResponses, setQuizResponses] = useState<QuizResponse[]>([]);
+  const [quizResponses, _setQuizResponses] = useState<QuizResponse[]>([]);
   const [dismissedQuizzes, setDismissedQuizzes] = useState<Set<string>>(new Set());
   
   // Student states
-  const [students, setStudents] = useState<StudentAttendance[]>([]);
+  const [students, _setStudents] = useState<StudentAttendance[]>([]);
   const [activeScreenShare, setActiveScreenShare] = useState<any>(null);
   const [isScreenShareActive, setIsScreenShareActive] = useState(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const screenShareRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const [setLocalStream] = useState<MediaStream | null>(null);
+  const [_localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const screenShareInstance = useRef(new EnhancedScreenShare());
 
@@ -757,171 +756,6 @@ useEffect(() => {
   }
 }, [isTeacher, classData, currentUser]);
 
-// Send join request
-// const sendJoinRequest = async () => {
-//   if (isTeacher || !classData || !currentUser) return;
-
-//   console.log('Sending join request to teacher');
-//   try {
-//     await sendSignalingMessage({
-//       type: 'join-request',
-//       fromUserId: currentUser.uid,
-//       targetUserId: classData.teacherId
-//     });
-//     toast.info('Requesting to join class...');
-//   } catch (error) {
-//     console.error('Error sending join request:', error);
-//   }
-// };
-
-  // Listen for real-time updates using the actual class document ID
-  useEffect(() => {
-    if (!classData?.id) return;
-
-    console.log('Setting up real-time listeners for class:', classData.id);
-
-    // Listen for active quizzes
-    const quizQuery = query(
-      collection(db, 'quizzes'), 
-      where('classId', '==', classData.id), 
-      where('isActive', '==', true),
-      limit(1)
-    );
-    
-    const unsubscribeQuiz = onSnapshot(quizQuery, 
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const quizDoc = snapshot.docs[0];
-          const quiz = {
-            id: quizDoc.id,
-            ...quizDoc.data(),
-            createdAt: quizDoc.data().createdAt?.toDate()
-          } as Quiz;
-          console.log('Active quiz detected:', quiz.question);
-          setActiveQuiz(quiz);
-          
-          if (!isTeacher && !dismissedQuizzes.has(quiz.id)) {
-            setShowQuizResponseDialog(true);
-            setSelectedOption(null);
-            setHasSubmitted(false);
-          }
-        } else {
-          setActiveQuiz(null);
-        }
-      },
-      (error) => {
-        console.error('Error listening to quizzes:', error);
-      }
-    );
-
-    // Listen for student attendance
-    const attendanceQuery = query(
-      collection(db, 'attendance'),
-      where('classId', '==', classData.id)
-    );
-
-    const unsubscribeAttendance = onSnapshot(attendanceQuery, 
-      (snapshot) => {
-        const studentsData = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-          joinedAt: doc.data().joinedAt?.toDate()
-        })) as StudentAttendance[];
-        setStudents(studentsData);
-      },
-      (error) => {
-        console.error('Error listening to attendance:', error);
-      }
-    );
-
-    // Listen for active screen shares
-    const screenShareQuery = query(
-      collection(db, 'screenShares'),
-      where('classId', '==', classData.id),
-      where('isActive', '==', true),
-      orderBy('startedAt', 'desc'),
-      limit(1)
-    );
-
-    const unsubscribeScreenShare = onSnapshot(screenShareQuery, 
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const screenShareDoc = snapshot.docs[0];
-          const screenShareData = {
-            id: screenShareDoc.id,
-            ...screenShareDoc.data(),
-            startedAt: screenShareDoc.data().startedAt?.toDate()
-          };
-          console.log('Active screen share detected:', screenShareData.id);
-          setActiveScreenShare(screenShareData);
-          setIsScreenShareActive(true);
-          
-          if (!isTeacher) {
-            toast.info('Teacher started screen sharing');
-          }
-        } else {
-          console.log('No active screen share found');
-          setActiveScreenShare(null);
-          setIsScreenShareActive(false);
-          
-          if (!isTeacher) {
-            if (screenShareRef.current) {
-              screenShareRef.current.srcObject = null;
-            }
-          }
-        }
-      },
-      (error) => {
-        console.error('Error listening to screen shares:', error);
-        setIsScreenShareActive(false);
-      }
-    );
-
-    return () => {
-      unsubscribeQuiz();
-      unsubscribeAttendance();
-      unsubscribeScreenShare();
-    };
-  }, [classData?.id, isTeacher, dismissedQuizzes]);
-
-  // Listen for quiz responses
-  useEffect(() => {
-    if (!activeQuiz) return;
-
-    const responsesQuery = query(
-      collection(db, 'quizResponses'), 
-      where('quizId', '==', activeQuiz.id),
-      orderBy('submittedAt', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(responsesQuery, 
-      (snapshot) => {
-        const responses = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-          submittedAt: doc.data().submittedAt?.toDate()
-        })) as QuizResponse[];
-
-        console.log('Quiz responses updated:', responses.length, 'responses');
-
-        setQuizResponses(responses);
-
-        if (!isTeacher && currentUser && responses.length > 0) {
-          const studentResponse = responses.find(r => r.studentId === currentUser.uid);
-          if (studentResponse) {
-            setHasSubmitted(true);
-            setSelectedOption(studentResponse.selectedOption);
-          }
-        }
-      },
-      (error) => {
-        console.error('Error listening to quiz responses:', error);
-      }
-    );
-
-    return () => unsubscribe();
-  }, [activeQuiz, currentUser, isTeacher]);
-
   // Initialize media streams
 const initializeMedia = async (audio: boolean = true, video: boolean = true) => {
   try {
@@ -935,7 +769,6 @@ const initializeMedia = async (audio: boolean = true, video: boolean = true) => 
     console.log('Requesting media permissions...');
     const stream = await webRTCManager.initializeLocalStream(audio, video);
     setLocalStream(stream);
-    setIsWebRTCInitialized(true);
     
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = stream;
