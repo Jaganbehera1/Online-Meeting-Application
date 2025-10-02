@@ -14,32 +14,39 @@ export class WebRTCManager {
     ]
   };
 
-  async initializeLocalStream(audio: boolean = true, video: boolean = true): Promise<MediaStream> {
-    try {
-      console.log('Initializing local stream with audio:', audio, 'video:', video);
-      
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: video ? {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 }
-        } : false,
-        audio: audio ? {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 2
-        } : false
-      });
-      
-      console.log('Local stream obtained:', this.localStream.id);
-      this.isInitialized = true;
-      return this.localStream;
-    } catch (error) {
-      console.error('Error accessing media devices:', error);
-      throw error;
+async initializeLocalStream(audio: boolean = true, video: boolean = true): Promise<MediaStream> {
+  try {
+    console.log('Initializing local stream with audio:', audio, 'video:', video);
+    
+    // Validate that at least one media type is requested
+    if (!audio && !video) {
+      throw new Error('At least one of audio or video must be requested');
     }
+
+    const constraints: MediaStreamConstraints = {
+      video: video ? {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 }
+      } : false,
+      audio: audio ? {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 2
+      } : false
+    };
+
+    this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    
+    console.log('Local stream obtained:', this.localStream.id);
+    this.isInitialized = true;
+    return this.localStream;
+  } catch (error) {
+    console.error('Error accessing media devices:', error);
+    throw error;
   }
+}
 
   createPeerConnection(studentId: string): RTCPeerConnection {
     console.log('Creating peer connection for:', studentId);

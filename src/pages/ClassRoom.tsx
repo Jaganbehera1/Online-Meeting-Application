@@ -765,8 +765,9 @@ useEffect(() => {
     
     const initializeStudentMedia = async () => {
       try {
-        // Initialize media but don't enable video/audio by default for students
-        await initializeMedia(false, false);
+        // Initialize media with at least one media type enabled
+        // For students, we'll enable audio by default but not video
+        await initializeMedia(true, false);
         console.log('Student media initialized');
         
         // Wait a bit for teacher to be ready, then send join request
@@ -775,7 +776,18 @@ useEffect(() => {
         }, 3000);
       } catch (error) {
         console.error('Failed to initialize student media:', error);
-        // Still try to send join request even if media fails
+        // If media initialization fails, still try to send join request
+        // but only enable audio (no video) as a fallback
+        try {
+          await initializeMedia(true, false);
+        } catch (fallbackError) {
+          console.error('Fallback media initialization also failed:', fallbackError);
+          // If even audio fails, try without any media (just for signaling)
+          // This allows the student to join and see teacher's video even if their own media fails
+          console.log('Proceeding without local media - student can still view teacher');
+        }
+        
+        // Send join request even if media fails
         setTimeout(() => {
           sendJoinRequest();
         }, 3000);
@@ -786,7 +798,7 @@ useEffect(() => {
   }
 }, [isTeacher, classData, currentUser]);
 
-  // Initialize media streams
+// Initialize media streams
 const initializeMedia = async (audio: boolean = true, video: boolean = true) => {
   try {
     setMediaError(null);
@@ -796,15 +808,26 @@ const initializeMedia = async (audio: boolean = true, video: boolean = true) => 
       return false;
     }
 
-    console.log('Requesting media permissions...');
+    // Validate that at least one media type is requested
+    if (!audio && !video) {
+      console.warn('Both audio and video are disabled, enabling audio by default');
+      audio = true; // Enable audio as fallback
+    }
+
+    console.log('Requesting media permissions for audio:', audio, 'video:', video);
     const stream = await webRTCManager.initializeLocalStream(audio, video);
     setLocalStream(stream);
+    setIsWebRTCInitialized(true);
     
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = stream;
     }
     
     if (isTeacher) {
+      setVideoEnabled(video);
+      setAudioEnabled(audio);
+    } else {
+      // For students, set the enabled states based on what was actually requested
       setVideoEnabled(video);
       setAudioEnabled(audio);
     }
@@ -824,10 +847,68 @@ const initializeMedia = async (audio: boolean = true, video: boolean = true) => 
     } else if (error.name === 'NotReadableError') {
       setMediaError('Camera/microphone is in use by another application. Please close other applications and try again.');
       toast.error('Camera/microphone is in use by another application. Please close other applications and try again.');
+    } else if (error.name === 'OverconstrainedError') {
+      setMediaError('Cannot satisfy the requested media constraints. Trying with different settings...');
+      console.warn('Media constraints cannot be satisfied, trying fallback...');
+      // Try with more permissive constraints
+      return await initializeMediaWithFallback(audio, video);
     } else {
       setMediaError('Failed to access camera/microphone. Please check your device permissions.');
       toast.error('Failed to access camera/microphone. Please check your device permissions.');
     }
+    return false;
+  }
+};
+
+// Fallback media initialization with more permissive constraints
+const initializeMediaWithFallback = async (audio: boolean, video: boolean): Promise<boolean> => {
+  try {
+    console.log('Trying fallback media initialization...');
+    
+    // If both failed, try just audio
+    if (!audio && !video) {
+      audio = true;
+    }
+    
+    // If video failed but was requested, try with lower constraints
+    if (video) {
+      try {
+        const stream = await webRTCManager.initializeLocalStream(audio, true);
+        setLocalStream(stream);
+        setIsWebRTCInitialized(true);
+        
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+        
+        setVideoEnabled(true);
+        setAudioEnabled(audio);
+        console.log('Fallback media initialization successful');
+        return true;
+      } catch (videoError) {
+        console.warn('Video initialization failed, trying audio only...');
+        // If video still fails, try audio only
+        return await initializeMediaWithFallback(audio, false);
+      }
+    }
+    
+    // Final attempt with just audio
+    const stream = await webRTCManager.initializeLocalStream(audio, false);
+    setLocalStream(stream);
+    setIsWebRTCInitialized(true);
+    
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = stream;
+    }
+    
+    setVideoEnabled(false);
+    setAudioEnabled(audio);
+    console.log('Audio-only media initialization successful');
+    return true;
+    
+  } catch (fallbackError) {
+    console.error('All media initialization attempts failed:', fallbackError);
+    setMediaError('Unable to access any media devices. You can still join the class to view the teacher.');
     return false;
   }
 };
@@ -1856,16 +1937,38 @@ useEffect(() => {
                         {audioEnabled ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
                       </Button>
                     </div>
+                    
+                    {/* Show media status */}
                     {!webRTCManager.isStreamInitialized() && (
-                      <Button 
-                        onClick={() => initializeMedia(true, true)} 
-                        size="sm" 
-                        variant="outline"
-                        className="w-full"
-                      >
-                        <Video className="w-4 h-4 mr-2" />
-                        Enable My Camera
-                      </Button>
+                      <div className="text-center">
+                        <Button 
+                          onClick={() => initializeMedia(true, false)} 
+                          size="sm" 
+                          variant="outline"
+                          className="w-full mb-2"
+                        >
+                          <Mic className="w-4 h-4 mr-2" />
+                          Enable Microphone
+                        </Button>
+                        <Button 
+                          onClick={() => initializeMedia(false, true)} 
+                          size="sm" 
+                          variant="outline"
+                          className="w-full"
+                        >
+                          <Video className="w-4 h-4 mr-2" />
+                          Enable Camera
+                        </Button>
+                        <p className="text-xs text-gray-400 mt-2">
+                          Enable at least one to participate with audio/video
+                        </p>
+                      </div>
+                    )}
+                    
+                    {mediaError && (
+                      <div className="text-xs text-red-400 bg-red-400/10 p-2 rounded">
+                        {mediaError}
+                      </div>
                     )}
                   </CardContent>
                 </Card>
