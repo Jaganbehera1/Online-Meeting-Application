@@ -255,6 +255,7 @@ export function ClassRoom() {
   const [webRTCManager] = useState(new WebRTCManager());
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [activeConnections, setActiveConnections] = useState<Set<string>>(new Set());
+  const [_isWebRTCInitialized, setIsWebRTCInitialized] = useState(false);
 
   // Quiz states
   const [showQuizDialog, setShowQuizDialog] = useState(false);
