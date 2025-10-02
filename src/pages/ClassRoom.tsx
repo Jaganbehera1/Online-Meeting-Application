@@ -22,10 +22,12 @@ import {
   Timestamp, 
   getDocs, 
   limit,
-  orderBy
+  orderBy,
+  deleteDoc
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { Class, Quiz, QuizResponse, StudentAttendance } from '@/types';
+import { WebRTCManager } from '@/lib/WebRTCManager';
 import { 
   Video, 
   VideoOff, 
@@ -42,20 +44,25 @@ import {
   Send,
   Copy,
   Monitor,
-  Eye
+  Eye,
+  User,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 import { toast } from 'sonner';
 
-// Enhanced WebRTC implementation for screen sharing
+// Enhanced Screen Share implementation
 class EnhancedScreenShare {
   private localStream: MediaStream | null = null;
   private isSharing = false;
   private lastMuteState: { video?: boolean, audio?: boolean } = {};
   private muteDebounceTimer: NodeJS.Timeout | null = null;
+  private eventListeners: { type: string; listener: EventListener }[] = [];
 
   async startScreenShare(): Promise<MediaStream> {
     try {
-      // Get screen share stream with better options
+      console.log('Starting screen share...');
+      
       this.localStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           cursor: 'always',
@@ -69,28 +76,29 @@ class EnhancedScreenShare {
           noiseSuppression: true,
           sampleRate: 44100,
           channelCount: 2
-        },
-        // surfaceSwitching: 'include',
-        // selfBrowserSurface: 'exclude'
+        }
       });
 
+      console.log('Screen share stream obtained:', this.localStream.id);
       this.isSharing = true;
 
-      // Initialize mute state tracking
       this.lastMuteState = {
         video: !this.localStream.getVideoTracks()[0]?.enabled,
         audio: !this.localStream.getAudioTracks()[0]?.enabled
       };
 
       // Handle when user stops screen share via browser UI
-      this.localStream.getVideoTracks()[0].onended = () => {
+      const handleTrackEnded = () => {
         console.log('Screen share ended by browser UI');
         this.stopScreenShare();
       };
 
+      this.localStream.getVideoTracks()[0].addEventListener('ended', handleTrackEnded);
+      this.eventListeners.push({ type: 'ended', listener: handleTrackEnded });
+
       // Add debounced event listeners for track events
       this.localStream.getTracks().forEach(track => {
-        track.addEventListener('mute', () => {
+        const handleMute = () => {
           if (this.muteDebounceTimer) {
             clearTimeout(this.muteDebounceTimer);
           }
@@ -99,20 +107,18 @@ class EnhancedScreenShare {
             const currentMuted = !track.enabled;
             const previousMuted = this.lastMuteState[track.kind as keyof typeof this.lastMuteState];
             
-            // Only log if state actually changed
             if (currentMuted !== previousMuted) {
               console.log('Track muted:', track.kind);
               this.lastMuteState[track.kind as keyof typeof this.lastMuteState] = currentMuted;
               
-              // Dispatch custom event for UI updates
               window.dispatchEvent(new CustomEvent('screenshare-mute-change', {
                 detail: { kind: track.kind, muted: currentMuted }
               }));
             }
           }, 100);
-        });
+        };
 
-        track.addEventListener('unmute', () => {
+        const handleUnmute = () => {
           if (this.muteDebounceTimer) {
             clearTimeout(this.muteDebounceTimer);
           }
@@ -121,23 +127,31 @@ class EnhancedScreenShare {
             const currentMuted = !track.enabled;
             const previousMuted = this.lastMuteState[track.kind as keyof typeof this.lastMuteState];
             
-            // Only log if state actually changed
             if (currentMuted !== previousMuted) {
               console.log('Track unmuted:', track.kind);
               this.lastMuteState[track.kind as keyof typeof this.lastMuteState] = currentMuted;
               
-              // Dispatch custom event for UI updates
               window.dispatchEvent(new CustomEvent('screenshare-mute-change', {
                 detail: { kind: track.kind, muted: currentMuted }
               }));
             }
           }, 100);
-        });
+        };
 
-        track.addEventListener('ended', () => {
+        const handleEnded = () => {
           console.log('Track ended:', track.kind);
           this.stopScreenShare();
-        });
+        };
+
+        track.addEventListener('mute', handleMute);
+        track.addEventListener('unmute', handleUnmute);
+        track.addEventListener('ended', handleEnded);
+
+        this.eventListeners.push(
+          { type: 'mute', listener: handleMute },
+          { type: 'unmute', listener: handleUnmute },
+          { type: 'ended', listener: handleEnded }
+        );
       });
 
       return this.localStream;
@@ -148,6 +162,18 @@ class EnhancedScreenShare {
   }
 
   stopScreenShare() {
+    console.log('Stopping screen share...');
+    
+    // Remove all event listeners first to prevent recursion
+    this.eventListeners.forEach(({ type, listener }) => {
+      if (this.localStream) {
+        this.localStream.getTracks().forEach(track => {
+          track.removeEventListener(type, listener);
+        });
+      }
+    });
+    this.eventListeners = [];
+    
     if (this.muteDebounceTimer) {
       clearTimeout(this.muteDebounceTimer);
       this.muteDebounceTimer = null;
@@ -159,8 +185,14 @@ class EnhancedScreenShare {
       });
       this.localStream = null;
     }
+    
     this.isSharing = false;
     this.lastMuteState = {};
+    
+    // Dispatch event only if we're actually stopping an active share
+    if (this.isSharing) {
+      window.dispatchEvent(new CustomEvent('screenshare-ended'));
+    }
   }
 
   isScreenSharing(): boolean {
@@ -171,14 +203,12 @@ class EnhancedScreenShare {
     return this.localStream;
   }
 
-  // Get stream info for debugging
   getStreamInfo() {
     if (!this.localStream) return null;
     
     const videoTrack = this.localStream.getVideoTracks()[0];
     const audioTrack = this.localStream.getAudioTracks()[0];
     
-    // Create a clean object without undefined values
     const streamInfo: any = {
       hasVideo: !!videoTrack,
       hasAudio: !!audioTrack,
@@ -186,7 +216,6 @@ class EnhancedScreenShare {
       audioReadyState: audioTrack?.readyState
     };
 
-    // Only include settings if they exist
     if (videoTrack) {
       streamInfo.videoSettings = {
         width: videoTrack.getSettings().width,
@@ -222,6 +251,12 @@ export function ClassRoom() {
   const [loading, setLoading] = useState(true);
   const [streamInfo, setStreamInfo] = useState<any>(null);
   
+  // WebRTC States
+  const [webRTCManager] = useState(new WebRTCManager());
+  const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
+  const [activeConnections, setActiveConnections] = useState<Set<string>>(new Set());
+  const [isWebRTCInitialized, setIsWebRTCInitialized] = useState(false);
+
   // Quiz states
   const [showQuizDialog, setShowQuizDialog] = useState(false);
   const [showQuizResponseDialog, setShowQuizResponseDialog] = useState(false);
@@ -239,9 +274,11 @@ export function ClassRoom() {
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const screenShareRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const screenShareInstance = useRef(new EnhancedScreenShare());
+
   const [newQuiz, setNewQuiz] = useState({
     question: '',
     option1: '',
@@ -335,6 +372,407 @@ export function ClassRoom() {
 
     findClassByRoomId();
   }, [classId, currentUser, navigate, isTeacher]);
+
+  // WebRTC Signaling Listener
+  useEffect(() => {
+    if (!classData?.id || !currentUser) return;
+
+    console.log('Setting up WebRTC signaling listener for class:', classData.id);
+
+    const signalingQuery = query(
+      collection(db, 'webrtcSignals'),
+      where('classId', '==', classData.id),
+      where('targetUserId', '==', currentUser.uid),
+      orderBy('createdAt', 'desc'),
+      limit(50)
+    );
+
+    const unsubscribeSignaling = onSnapshot(signalingQuery, 
+      async (snapshot) => {
+        for (const docChange of snapshot.docChanges()) {
+          if (docChange.type === 'added') {
+            const signal = docChange.doc.data();
+            console.log('Received WebRTC signal:', signal.type, 'from:', signal.fromUserId);
+            await handleSignalingMessage(signal);
+            
+            // Clean up the signal after processing
+            try {
+              await deleteDoc(doc(db, 'webrtcSignals', docChange.doc.id));
+            } catch (error) {
+              console.error('Error deleting signal:', error);
+            }
+          }
+        }
+      },
+      (error) => {
+        console.error('Error listening to WebRTC signals:', error);
+      }
+    );
+
+    return () => unsubscribeSignaling();
+  }, [classData?.id, currentUser, isTeacher]);
+
+// Handle WebRTC signaling messages
+const handleSignalingMessage = async (signal: any) => {
+  try {
+    // Skip if this is our own signal
+    if (signal.fromUserId === currentUser?.uid) {
+      return;
+    }
+
+    // Reconstruct RTC objects from plain objects
+    let processedSignal = { ...signal };
+    
+    if (signal.offer) {
+      processedSignal.offer = new RTCSessionDescription({
+        type: signal.offer.type,
+        sdp: signal.offer.sdp
+      });
+    }
+    
+    if (signal.answer) {
+      processedSignal.answer = new RTCSessionDescription({
+        type: signal.answer.type,
+        sdp: signal.answer.sdp
+      });
+    }
+    
+    if (signal.candidate) {
+      processedSignal.candidate = signal.candidate; // Already a plain object
+    }
+
+    console.log('Processing WebRTC signal:', processedSignal.type, 'from:', processedSignal.fromUserId, 'state:', webRTCManager.getSignalingState(processedSignal.fromUserId));
+
+    switch (processedSignal.type) {
+      case 'offer':
+        if (!isTeacher) {
+          console.log('Handling offer from teacher:', processedSignal.fromUserId);
+          
+          // Check if we already have a connection
+          if (webRTCManager.hasConnection(processedSignal.fromUserId)) {
+            console.log('Already have connection with teacher, skipping offer');
+            return;
+          }
+          
+          const answer = await webRTCManager.handleOffer(processedSignal.fromUserId, processedSignal.offer);
+          await sendSignalingMessage({
+            type: 'answer',
+            fromUserId: currentUser?.uid,
+            targetUserId: processedSignal.fromUserId,
+            answer: answer
+          });
+        }
+        break;
+
+      case 'answer':
+        if (isTeacher) {
+          console.log('Handling answer from student:', processedSignal.fromUserId);
+          
+          // Check connection state before handling answer
+          const signalingState = webRTCManager.getSignalingState(processedSignal.fromUserId);
+          if (signalingState !== 'have-local-offer') {
+            console.warn(`Cannot handle answer in state: ${signalingState}, expected: have-local-offer`);
+            return;
+          }
+          
+          await webRTCManager.handleAnswer(processedSignal.fromUserId, processedSignal.answer);
+        }
+        break;
+
+      case 'ice-candidate':
+        console.log('Handling ICE candidate from:', processedSignal.fromUserId);
+        await webRTCManager.addIceCandidate(processedSignal.fromUserId, processedSignal.candidate);
+        break;
+
+      case 'join-request':
+        if (isTeacher) {
+          console.log('Handling join request from student:', processedSignal.fromUserId);
+          
+          // Check if we already have a connection with this student
+          if (webRTCManager.hasConnection(processedSignal.fromUserId)) {
+            console.log('Already connected to student:', processedSignal.fromUserId);
+            return;
+          }
+          
+          await initiateConnectionWithStudent(processedSignal.fromUserId);
+        }
+        break;
+    }
+  } catch (error) {
+    console.error('Error handling signaling message:', error);
+  }
+};
+
+  // Send signaling message
+  const sendSignalingMessage = async (message: any) => {
+    if (!classData || !currentUser) return;
+
+    try {
+      await addDoc(collection(db, 'webrtcSignals'), {
+        ...message,
+        classId: classData.id,
+        createdAt: Timestamp.fromDate(new Date())
+      });
+      console.log('Sent WebRTC signal:', message.type);
+    } catch (error) {
+      console.error('Error sending signaling message:', error);
+    }
+  };
+
+// Initiate connection with student (teacher only)
+const initiateConnectionWithStudent = async (studentId: string) => {
+  if (!isTeacher || !currentUser) return;
+
+  // Check if we already have a connection
+  if (webRTCManager.hasConnection(studentId)) {
+    console.log('Already have connection with student:', studentId);
+    return;
+  }
+
+  try {
+    console.log('Initiating connection with student:', studentId);
+    const offer = await webRTCManager.createOffer(studentId);
+    await sendSignalingMessage({
+      type: 'offer',
+      fromUserId: currentUser.uid,
+      targetUserId: studentId,
+      offer: offer
+    });
+  } catch (error) {
+    console.error('Error initiating connection:', error);
+    toast.error('Failed to connect with student');
+    
+    // Clean up failed connection
+    webRTCManager.closeConnection(studentId);
+  }
+};
+
+  // Student join request
+  const sendJoinRequest = async () => {
+    if (isTeacher || !classData || !currentUser) return;
+
+    console.log('Sending join request to teacher');
+    await sendSignalingMessage({
+      type: 'join-request',
+      fromUserId: currentUser.uid,
+      targetUserId: classData.teacherId
+    });
+  };
+
+  // WebRTC Event Listeners
+  useEffect(() => {
+    const handleRemoteStreamAdded = (event: CustomEvent) => {
+      const { studentId, stream } = event.detail;
+      console.log('Remote stream added event:', studentId);
+      setRemoteStreams(prev => new Map(prev).set(studentId, stream));
+      
+      // Update video element when it's available
+      setTimeout(() => {
+        const videoElement = remoteVideoRefs.current.get(studentId);
+        if (videoElement && stream) {
+          videoElement.srcObject = stream;
+          console.log('Set remote stream for video element:', studentId);
+        }
+      }, 100);
+    };
+
+    const handleRemoteStreamRemoved = (event: CustomEvent) => {
+      const { studentId } = event.detail;
+      console.log('Remote stream removed event:', studentId);
+      setRemoteStreams(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(studentId);
+        return newMap;
+      });
+    };
+
+    const handlePeerConnected = (event: CustomEvent) => {
+      const { studentId } = event.detail;
+      console.log('Peer connected event:', studentId);
+      setActiveConnections(prev => new Set(prev).add(studentId));
+      
+      if (isTeacher) {
+        toast.success(`Connected with student`);
+      } else {
+        toast.success('Connected with teacher');
+      }
+    };
+
+    const handlePeerDisconnected = (event: CustomEvent) => {
+      const { studentId } = event.detail;
+      console.log('Peer disconnected event:', studentId);
+      setActiveConnections(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(studentId);
+        return newSet;
+      });
+      setRemoteStreams(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(studentId);
+        return newMap;
+      });
+      
+      if (isTeacher) {
+        toast.info(`Student disconnected`);
+      }
+    };
+
+    const handleIceCandidate = (event: CustomEvent) => {
+      const { studentId, candidate } = event.detail;
+      sendSignalingMessage({
+        type: 'ice-candidate',
+        fromUserId: currentUser?.uid,
+        targetUserId: studentId,
+        candidate: candidate
+      });
+    };
+
+    window.addEventListener('remote-stream-added', handleRemoteStreamAdded as EventListener);
+    window.addEventListener('remote-stream-removed', handleRemoteStreamRemoved as EventListener);
+    window.addEventListener('peer-connected', handlePeerConnected as EventListener);
+    window.addEventListener('peer-disconnected', handlePeerDisconnected as EventListener);
+    window.addEventListener('ice-candidate', handleIceCandidate as EventListener);
+
+    return () => {
+      window.removeEventListener('remote-stream-added', handleRemoteStreamAdded as EventListener);
+      window.removeEventListener('remote-stream-removed', handleRemoteStreamRemoved as EventListener);
+      window.removeEventListener('peer-connected', handlePeerConnected as EventListener);
+      window.removeEventListener('peer-disconnected', handlePeerDisconnected as EventListener);
+      window.removeEventListener('ice-candidate', handleIceCandidate as EventListener);
+    };
+  }, [currentUser, isTeacher]);
+
+// Initialize WebRTC for teacher
+useEffect(() => {
+  if (isTeacher) {
+    const initializeTeacherMedia = async () => {
+      try {
+        await initializeMedia(true, true);
+        console.log('Teacher media initialized successfully');
+      } catch (error) {
+        console.error('Failed to initialize teacher media:', error);
+      }
+    };
+    initializeTeacherMedia();
+  }
+}, [isTeacher]);
+
+// WebRTC Signaling Listener with duplicate prevention
+useEffect(() => {
+  if (!classData?.id || !currentUser) return;
+
+  console.log('Setting up WebRTC signaling listener for class:', classData.id);
+
+  const processedSignalIds = new Set<string>();
+
+  const signalingQuery = query(
+    collection(db, 'webrtcSignals'),
+    where('classId', '==', classData.id),
+    where('targetUserId', '==', currentUser.uid),
+    orderBy('createdAt', 'desc'),
+    limit(20)
+  );
+
+  const unsubscribeSignaling = onSnapshot(signalingQuery, 
+    async (snapshot) => {
+      for (const docChange of snapshot.docChanges()) {
+        if (docChange.type === 'added') {
+          const signal = docChange.doc.data();
+          const signalId = docChange.doc.id;
+          
+          // Prevent processing the same signal multiple times
+          if (processedSignalIds.has(signalId)) {
+            continue;
+          }
+          processedSignalIds.add(signalId);
+          
+          console.log('Received WebRTC signal:', signal.type, 'from:', signal.fromUserId);
+          await handleSignalingMessage(signal);
+          
+          // Clean up the signal after processing
+          try {
+            await deleteDoc(doc(db, 'webrtcSignals', signalId));
+          } catch (error) {
+            console.error('Error deleting signal:', error);
+          }
+        }
+      }
+    },
+    (error) => {
+      console.error('Error listening to WebRTC signals:', error);
+    }
+  );
+
+  return () => {
+    unsubscribeSignaling();
+    // Clean up WebRTC connections when component unmounts
+    webRTCManager.closeAllConnections();
+    webRTCManager.stopLocalStream();
+  };
+}, [classData?.id, currentUser, isTeacher]);
+
+// Monitor connection states
+useEffect(() => {
+  const intervalId = setInterval(() => {
+    if (isTeacher) {
+      const activeConnections = webRTCManager.getActiveConnections();
+      console.log('Active connections:', activeConnections.length);
+      
+      activeConnections.forEach(studentId => {
+        const state = webRTCManager.getConnectionState(studentId);
+        const signalingState = webRTCManager.getSignalingState(studentId);
+        console.log(`Student ${studentId}: connection=${state}, signaling=${signalingState}`);
+      });
+    }
+  }, 10000); // Log every 10 seconds
+
+  return () => clearInterval(intervalId);
+}, [isTeacher]);
+
+// Student auto-join when class is loaded
+useEffect(() => {
+  if (!isTeacher && classData && currentUser) {
+    console.log('Student preparing to join class');
+    
+    const initializeStudentMedia = async () => {
+      try {
+        // Initialize media but don't enable video/audio by default for students
+        await initializeMedia(false, false);
+        console.log('Student media initialized');
+        
+        // Wait a bit for teacher to be ready, then send join request
+        setTimeout(() => {
+          sendJoinRequest();
+        }, 3000);
+      } catch (error) {
+        console.error('Failed to initialize student media:', error);
+        // Still try to send join request even if media fails
+        setTimeout(() => {
+          sendJoinRequest();
+        }, 3000);
+      }
+    };
+
+    initializeStudentMedia();
+  }
+}, [isTeacher, classData, currentUser]);
+
+// Send join request
+// const sendJoinRequest = async () => {
+//   if (isTeacher || !classData || !currentUser) return;
+
+//   console.log('Sending join request to teacher');
+//   try {
+//     await sendSignalingMessage({
+//       type: 'join-request',
+//       fromUserId: currentUser.uid,
+//       targetUserId: classData.teacherId
+//     });
+//     toast.info('Requesting to join class...');
+//   } catch (error) {
+//     console.error('Error sending join request:', error);
+//   }
+// };
 
   // Listen for real-time updates using the actual class document ID
   useEffect(() => {
@@ -446,14 +884,14 @@ export function ClassRoom() {
     };
   }, [classData?.id, isTeacher, dismissedQuizzes]);
 
-  // Listen for quiz responses - UPDATED FOR TEACHER VIEW
+  // Listen for quiz responses
   useEffect(() => {
     if (!activeQuiz) return;
 
     const responsesQuery = query(
       collection(db, 'quizResponses'), 
       where('quizId', '==', activeQuiz.id),
-      orderBy('submittedAt', 'desc') // Order by submission time
+      orderBy('submittedAt', 'desc')
     );
 
     const unsubscribe = onSnapshot(responsesQuery, 
@@ -466,10 +904,8 @@ export function ClassRoom() {
 
         console.log('Quiz responses updated:', responses.length, 'responses');
 
-        // Update all responses for both teacher and student view
         setQuizResponses(responses);
 
-        // Track if current student has already submitted (for students only)
         if (!isTeacher && currentUser && responses.length > 0) {
           const studentResponse = responses.find(r => r.studentId === currentUser.uid);
           if (studentResponse) {
@@ -486,74 +922,63 @@ export function ClassRoom() {
     return () => unsubscribe();
   }, [activeQuiz, currentUser, isTeacher]);
 
-  // Initialize media streams only when needed
-  const initializeMedia = async () => {
-    try {
-      setMediaError(null);
-      
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setMediaError('Media devices not supported in this browser');
-        return;
-      }
-
-      console.log('Requesting media permissions...');
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 }
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
-      
-      console.log('Media stream obtained');
-      setLocalStream(stream);
-      
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-      
-      if (isTeacher) {
-        setVideoEnabled(true);
-        setAudioEnabled(true);
-      }
-      
-    } catch (error: any) {
-      console.error('Error accessing media devices:', error);
-      
-      if (error.name === 'NotAllowedError') {
-        setMediaError('Camera/microphone access denied. Please allow permissions in your browser.');
-        toast.error('Camera/microphone access denied. Please allow permissions to use these features.');
-      } else if (error.name === 'NotFoundError') {
-        setMediaError('No camera/microphone found. Please connect a device to use these features.');
-        toast.error('No camera/microphone found. Please connect a device to use these features.');
-      } else if (error.name === 'NotReadableError') {
-        setMediaError('Camera/microphone is in use by another application. Please close other applications and try again.');
-        toast.error('Camera/microphone is in use by another application. Please close other applications and try again.');
-      } else {
-        setMediaError('Failed to access camera/microphone. Please check your device permissions.');
-        toast.error('Failed to access camera/microphone. Please check your device permissions.');
-      }
+  // Initialize media streams
+const initializeMedia = async (audio: boolean = true, video: boolean = true) => {
+  try {
+    setMediaError(null);
+    
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setMediaError('Media devices not supported in this browser');
+      return false;
     }
-  };
+
+    console.log('Requesting media permissions...');
+    const stream = await webRTCManager.initializeLocalStream(audio, video);
+    setLocalStream(stream);
+    setIsWebRTCInitialized(true);
+    
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = stream;
+    }
+    
+    if (isTeacher) {
+      setVideoEnabled(video);
+      setAudioEnabled(audio);
+    }
+    
+    console.log('Media stream initialized successfully');
+    return true;
+    
+  } catch (error: any) {
+    console.error('Error accessing media devices:', error);
+    
+    if (error.name === 'NotAllowedError') {
+      setMediaError('Camera/microphone access denied. Please allow permissions in your browser.');
+      toast.error('Camera/microphone access denied. Please allow permissions to use these features.');
+    } else if (error.name === 'NotFoundError') {
+      setMediaError('No camera/microphone found. Please connect a device to use these features.');
+      toast.error('No camera/microphone found. Please connect a device to use these features.');
+    } else if (error.name === 'NotReadableError') {
+      setMediaError('Camera/microphone is in use by another application. Please close other applications and try again.');
+      toast.error('Camera/microphone is in use by another application. Please close other applications and try again.');
+    } else {
+      setMediaError('Failed to access camera/microphone. Please check your device permissions.');
+      toast.error('Failed to access camera/microphone. Please check your device permissions.');
+    }
+    return false;
+  }
+};
 
   const toggleVideo = async () => {
-    if (!localStream) {
-      await initializeMedia();
-      if (!localStream) return;
-    }
-
     const newVideoState = !videoEnabled;
-    setVideoEnabled(newVideoState);
     
-    const videoTrack = localStream!.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = newVideoState;
+    if (!webRTCManager.isStreamInitialized()) {
+      await initializeMedia(audioEnabled, true);
+    } else {
+      webRTCManager.updateLocalStreamTracks(audioEnabled, newVideoState);
     }
+    
+    setVideoEnabled(newVideoState);
 
     if (newVideoState) {
       toast.success('Camera turned on');
@@ -563,18 +988,15 @@ export function ClassRoom() {
   };
 
   const toggleAudio = async () => {
-    if (!localStream) {
-      await initializeMedia();
-      if (!localStream) return;
-    }
-
     const newAudioState = !audioEnabled;
-    setAudioEnabled(newAudioState);
     
-    const audioTrack = localStream!.getAudioTracks()[0];
-    if (audioTrack) {
-      audioTrack.enabled = newAudioState;
+    if (!webRTCManager.isStreamInitialized()) {
+      await initializeMedia(true, videoEnabled);
+    } else {
+      webRTCManager.updateLocalStreamTracks(newAudioState, videoEnabled);
     }
+    
+    setAudioEnabled(newAudioState);
 
     if (newAudioState) {
       toast.success('Microphone turned on');
@@ -583,113 +1005,112 @@ export function ClassRoom() {
     }
   };
 
-  const handleStartScreenShare = async () => {
-    try {
-      console.log('Starting screen share...');
-      
-      const stream = await screenShareInstance.current.startScreenShare();
-      setScreenStream(stream);
-      setIsScreenSharing(true);
+const handleStartScreenShare = async () => {
+  try {
+    console.log('Starting screen share...');
+    
+    const stream = await screenShareInstance.current.startScreenShare();
+    setScreenStream(stream);
+    setIsScreenSharing(true);
 
-      const info = screenShareInstance.current.getStreamInfo();
-      setStreamInfo(info);
-      console.log('Screen share stream info:', info);
+    const info = screenShareInstance.current.getStreamInfo();
+    setStreamInfo(info);
+    console.log('Screen share stream info:', info);
 
-      if (screenShareRef.current) {
-        screenShareRef.current.srcObject = stream;
-        console.log('Screen share stream attached to video element');
-      }
+    if (screenShareRef.current) {
+      screenShareRef.current.srcObject = stream;
+      console.log('Screen share stream attached to video element');
+    }
 
-      // Record screen share in database for students
-      if (isTeacher && classData) {
-        try {
-          // First, deactivate any existing screen shares
-          const existingSharesQuery = query(
-            collection(db, 'screenShares'),
-            where('classId', '==', classData.id),
-            where('isActive', '==', true)
-          );
-          
-          const existingShares = await getDocs(existingSharesQuery);
-          const updatePromises = existingShares.docs.map(doc => 
-            updateDoc(doc.ref, {
-              isActive: false,
-              endedAt: Timestamp.fromDate(new Date())
-            })
-          );
-          
-          await Promise.all(updatePromises);
+    // Record screen share in database for students
+    if (isTeacher && classData) {
+      try {
+        // First, deactivate any existing screen shares
+        const existingSharesQuery = query(
+          collection(db, 'screenShares'),
+          where('classId', '==', classData.id),
+          where('isActive', '==', true)
+        );
+        
+        const existingShares = await getDocs(existingSharesQuery);
+        const updatePromises = existingShares.docs.map(doc => 
+          updateDoc(doc.ref, {
+            isActive: false,
+            endedAt: Timestamp.fromDate(new Date())
+          })
+        );
+        
+        await Promise.all(updatePromises);
 
-          // Create new screen share record
-          const screenShareData: any = {
-            classId: classData.id,
-            teacherId: currentUser?.uid,
-            teacherName: currentUser?.displayName || currentUser?.email,
-            isActive: true,
-            startedAt: Timestamp.fromDate(new Date()),
-            streamId: `screenshare-${Date.now()}`
-          };
+        // Create new screen share record
+        const screenShareData: any = {
+          classId: classData.id,
+          teacherId: currentUser?.uid,
+          teacherName: currentUser?.displayName || currentUser?.email,
+          isActive: true,
+          startedAt: Timestamp.fromDate(new Date()),
+          streamId: `screenshare-${Date.now()}`
+        };
 
-          if (info) {
-            const cleanStreamInfo = JSON.parse(JSON.stringify(info));
-            screenShareData.streamInfo = cleanStreamInfo;
-          }
-
-          await addDoc(collection(db, 'screenShares'), screenShareData);
-          
-          console.log('Screen share recorded in database');
-        } catch (dbError: any) {
-          console.error('Error recording screen share in database:', dbError);
-          toast.warning('Screen sharing started, but database update failed. Students may not see the share indicator.');
+        if (info) {
+          const cleanStreamInfo = JSON.parse(JSON.stringify(info));
+          screenShareData.streamInfo = cleanStreamInfo;
         }
-      }
 
-      toast.success('Screen sharing started - Students can now see your screen');
-      
-      // Add event listener for mute changes
-      const handleMuteChange = (event: CustomEvent) => {
-        const { kind, muted } = event.detail;
-        if (kind === 'video') {
-          if (muted) {
-            toast.warning('Screen share video paused');
-          } else {
-            toast.info('Screen share video resumed');
-          }
-        }
-      };
-
-      window.addEventListener('screenshare-mute-change', handleMuteChange as EventListener);
-
-      // Monitor stream health
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.addEventListener('ended', () => {
-          console.log('Screen share video track ended');
-          window.removeEventListener('screenshare-mute-change', handleMuteChange as EventListener);
-          handleStopScreenShare();
-        });
-      }
-
-      const audioTrack = stream.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.addEventListener('ended', () => {
-          console.log('Screen share audio track ended');
-        });
-      }
-      
-    } catch (error) {
-      console.error('Error starting screen share:', error);
-      if ((error as Error).name === 'NotAllowedError') {
-        toast.error('Screen sharing permission denied. Please allow screen sharing in your browser.');
-      } else if ((error as Error).name === 'NotFoundError') {
-        toast.error('No screen sharing sources found. Please check your system settings.');
-      } else if ((error as Error).name === 'NotSupportedError') {
-        toast.error('Screen sharing is not supported in this browser.');
-      } else {
-        toast.error('Failed to start screen sharing. Please try again.');
+        await addDoc(collection(db, 'screenShares'), screenShareData);
+        
+        console.log('Screen share recorded in database');
+      } catch (dbError: any) {
+        console.error('Error recording screen share in database:', dbError);
+        toast.warning('Screen sharing started, but database update failed. Students may not see the share indicator.');
       }
     }
-  };
+
+    toast.success('Screen sharing started - Students can now see your screen');
+    
+    // Add event listener for mute changes
+    const handleMuteChange = (event: CustomEvent) => {
+      const { kind, muted } = event.detail;
+      if (kind === 'video') {
+        if (muted) {
+          toast.warning('Screen share video paused');
+        } else {
+          toast.info('Screen share video resumed');
+        }
+      }
+    };
+
+    const handleScreenShareEnded = () => {
+      console.log('Screen share ended event received');
+      // Remove event listeners first
+      window.removeEventListener('screenshare-mute-change', handleMuteChange as EventListener);
+      window.removeEventListener('screenshare-ended', handleScreenShareEnded);
+      // Then stop screen share
+      handleStopScreenShare();
+    };
+
+    window.addEventListener('screenshare-mute-change', handleMuteChange as EventListener);
+    window.addEventListener('screenshare-ended', handleScreenShareEnded);
+
+    // Return cleanup function
+    return () => {
+      window.removeEventListener('screenshare-mute-change', handleMuteChange as EventListener);
+      window.removeEventListener('screenshare-ended', handleScreenShareEnded);
+    };
+    
+  } catch (error) {
+    console.error('Error starting screen share:', error);
+    if ((error as Error).name === 'NotAllowedError') {
+      toast.error('Screen sharing permission denied. Please allow screen sharing in your browser.');
+    } else if ((error as Error).name === 'NotFoundError') {
+      toast.error('No screen sharing sources found. Please check your system settings.');
+    } else if ((error as Error).name === 'NotSupportedError') {
+      toast.error('Screen sharing is not supported in this browser.');
+    } else {
+      toast.error('Failed to start screen sharing. Please try again.');
+    }
+  }
+};
 
   const handleStopScreenShare = async () => {
     console.log('Stopping screen share...');
@@ -707,17 +1128,14 @@ export function ClassRoom() {
         });
         console.log('Screen share stopped in database');
         
-        // Also clear the local state immediately
         setActiveScreenShare(null);
         setIsScreenShareActive(false);
       } catch (error) {
         console.error('Error updating screen share record:', error);
-        // Even if database fails, clear local state
         setActiveScreenShare(null);
         setIsScreenShareActive(false);
       }
     } else if (isTeacher && classData) {
-      // If no activeScreenShare but we're sharing, try to find and stop any active shares
       try {
         const activeSharesQuery = query(
           collection(db, 'screenShares'),
@@ -847,9 +1265,9 @@ export function ClassRoom() {
       });
       
       // Stop all media streams
-      if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-      }
+      webRTCManager.stopLocalStream();
+      webRTCManager.closeAllConnections();
+      
       if (screenStream) {
         screenStream.getTracks().forEach(track => track.stop());
       }
@@ -881,35 +1299,57 @@ export function ClassRoom() {
   };
 
   const retryMedia = () => {
-    initializeMedia();
+    initializeMedia(audioEnabled, videoEnabled);
   };
+  // Monitor and display connection status
+useEffect(() => {
+  if (isTeacher) {
+    const interval = setInterval(() => {
+      const activeConnectionsList = webRTCManager.getActiveConnections();
+      console.log(`Teacher: ${activeConnectionsList.length} active connections`);
+      
+      activeConnectionsList.forEach(studentId => {
+        const connectionState = webRTCManager.getConnectionState(studentId);
+        const signalingState = webRTCManager.getSignalingState(studentId);
+        console.log(`Student ${studentId}: ${connectionState} (signaling: ${signalingState})`);
+      });
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }
+}, [isTeacher]);
 
   // Initialize media for teachers on component mount
   useEffect(() => {
     if (isTeacher) {
-      initializeMedia();
+      initializeMedia(true, true);
     }
   }, [isTeacher]);
 
-  // Cleanup media streams on unmount
-  useEffect(() => {
-    return () => {
-      if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-      }
-      if (screenStream) {
-        screenStream.getTracks().forEach(track => track.stop());
-      }
-      screenShareInstance.current.stopScreenShare();
-    };
-  }, [localStream, screenStream]);
+// Cleanup media streams on unmount
+useEffect(() => {
+  return () => {
+    console.log('Cleaning up classroom resources');
+    webRTCManager.stopLocalStream();
+    webRTCManager.closeAllConnections();
+    
+    if (screenStream) {
+      screenStream.getTracks().forEach(track => track.stop());
+    }
+    screenShareInstance.current.stopScreenShare();
+  };
+}, [screenStream]);
 
   const correctCount = quizResponses.filter(r => r.isCorrect).length;
   const totalResponses = quizResponses.length;
   const accuracy = totalResponses > 0 ? Math.round((correctCount / totalResponses) * 100) : 0;
 
-  // const hasActiveQuizForStudent = !isTeacher && activeQuiz && !dismissedQuizzes.has(activeQuiz.id);
   const canReopenQuiz = !isTeacher && activeQuiz && dismissedQuizzes.has(activeQuiz.id) && !hasSubmitted;
+
+  // Get connection status for a student
+  const getConnectionStatus = (studentId: string) => {
+    return activeConnections.has(studentId) ? 'connected' : 'disconnected';
+  };
 
   if (loading) {
     return (
@@ -952,6 +1392,7 @@ export function ClassRoom() {
                 with {classData.teacherName} • {classData.status?.toUpperCase()}
                 {isScreenShareActive && !isTeacher && ' • SCREEN SHARING'}
                 {activeQuiz && !isTeacher && ' • QUIZ ACTIVE'}
+                {isTeacher && ` • ${activeConnections.size}/${students.length} CONNECTED`}
               </p>
             </div>
           </div>
@@ -967,6 +1408,13 @@ export function ClassRoom() {
             <Users className="w-4 h-4" />
             <span className="text-sm font-medium">{students.length}</span>
           </div>
+          
+          {isTeacher && (
+            <div className="flex items-center gap-2 bg-green-700 px-3 py-1 rounded-full">
+              <Wifi className="w-4 h-4" />
+              <span className="text-sm font-medium">{activeConnections.size} connected</span>
+            </div>
+          )}
           
           {isScreenShareActive && (
             <Badge variant="secondary" className="bg-green-500 text-white">
@@ -1005,7 +1453,8 @@ export function ClassRoom() {
         <div className="bg-blue-900 text-blue-100 p-2 text-xs">
           <strong>Debug:</strong> Class: {classData.title} | Status: {classData.status} | 
           Teacher: {isTeacher ? 'Yes' : 'No'} | Screen Share Active: {isScreenShareActive ? 'Yes' : 'No'} |
-          Students: {students.length} | Active Quiz: {activeQuiz ? 'Yes' : 'No'}
+          Students: {students.length} | Active Quiz: {activeQuiz ? 'Yes' : 'No'} |
+          WebRTC Connected: {activeConnections.size} | Remote Streams: {remoteStreams.size}
         </div>
       )}
 
@@ -1118,11 +1567,12 @@ export function ClassRoom() {
             </div>
           ) : isTeacher ? (
             <div className="h-full flex flex-col">
+              {/* Teacher's Local Video and Controls */}
               <div className="mb-4">
                 <Card className="bg-gray-800 border-gray-700">
                   <CardHeader className="pb-3">
                     <CardTitle className="text-sm flex items-center justify-between">
-                      <span>Your Video Preview</span>
+                      <span>Your Video & Audio</span>
                       <div className="flex gap-2">
                         <Button
                           variant={videoEnabled ? "default" : "secondary"}
@@ -1173,6 +1623,63 @@ export function ClassRoom() {
                 </Card>
               </div>
 
+              {/* Students' Videos Grid */}
+              {remoteStreams.size > 0 && (
+                <div className="mb-4">
+                  <Card className="bg-gray-800 border-gray-700">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm flex items-center gap-2">
+                        <Users className="w-4 h-4" />
+                        Students ({remoteStreams.size}/{students.length} connected)
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {Array.from(remoteStreams.entries()).map(([studentId, stream]) => {
+                          const student = students.find(s => s.studentId === studentId);
+                          const isConnected = activeConnections.has(studentId);
+                          
+                          return (
+                            <div key={studentId} className="relative bg-black rounded-lg overflow-hidden aspect-video">
+                              <video
+                                ref={el => {
+                                  if (el) {
+                                    remoteVideoRefs.current.set(studentId, el);
+                                    el.srcObject = stream;
+                                  }
+                                }}
+                                autoPlay
+                                playsInline
+                                className="w-full h-full object-cover"
+                              />
+                              <div className="absolute bottom-2 left-2 bg-black bg-opacity-70 text-white px-2 py-1 rounded text-xs">
+                                <div className="flex items-center gap-1">
+                                  {isConnected ? (
+                                    <Wifi className="w-3 h-3 text-green-400" />
+                                  ) : (
+                                    <WifiOff className="w-3 h-3 text-red-400" />
+                                  )}
+                                  {student?.studentName || 'Student'}
+                                </div>
+                              </div>
+                              <div className="absolute top-2 right-2">
+                                <Badge 
+                                  variant={isConnected ? "default" : "secondary"} 
+                                  className={`text-xs ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}
+                                >
+                                  {isConnected ? 'Live' : 'Offline'}
+                                </Badge>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+
+              {/* Screen Share Option */}
               <div className="flex-1 flex flex-col items-center justify-center bg-gray-800 rounded-xl p-8">
                 <ScreenShare className="w-24 h-24 text-gray-500 mb-4" />
                 <h2 className="text-2xl font-semibold mb-2">Ready to present?</h2>
@@ -1194,27 +1701,144 @@ export function ClassRoom() {
               </div>
             </div>
           ) : (
-            <div className="h-full flex flex-col items-center justify-center bg-gray-800 rounded-xl p-8">
-              <Monitor className="w-24 h-24 text-gray-500 mb-4" />
-              <h2 className="text-2xl font-semibold mb-2">Waiting for presenter</h2>
-              <p className="text-gray-400 text-center max-w-md">
-                The teacher will start sharing their screen shortly. You'll see the presentation here in real-time.
-              </p>
-              {classData.teacherName && (
-                <p className="text-blue-400 mt-4">
-                  Teacher: {classData.teacherName}
-                </p>
+            /* Student View */
+            <div className="h-full flex flex-col">
+              {/* Teacher's Video for Students */}
+              {remoteStreams.size > 0 ? (
+                <div className="mb-4">
+                  <Card className="bg-gray-800 border-gray-700">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm flex items-center gap-2">
+                        <Video className="w-4 h-4 text-green-400" />
+                        {classData.teacherName}'s Video
+                        <Badge variant="secondary" className="bg-green-500 text-white">
+                          LIVE
+                        </Badge>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="grid grid-cols-1 gap-4">
+                        {Array.from(remoteStreams.entries()).map(([teacherId, stream]) => (
+                          <div key={teacherId} className="relative aspect-video bg-black rounded-lg overflow-hidden">
+                            <video
+                              ref={el => {
+                                if (el) {
+                                  remoteVideoRefs.current.set(teacherId, el);
+                                  el.srcObject = stream;
+                                }
+                              }}
+                              autoPlay
+                              playsInline
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute bottom-2 left-2 bg-black bg-opacity-70 text-white px-2 py-1 rounded text-xs">
+                              {classData.teacherName} (Teacher)
+                            </div>
+                            <div className="absolute top-2 right-2">
+                              <Badge variant="default" className="bg-green-500 text-white text-xs">
+                                Live
+                              </Badge>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              ) : (
+                <div className="mb-4 text-center py-8 bg-gray-800 rounded-xl">
+                  <User className="w-16 h-16 text-gray-500 mx-auto mb-4" />
+                  <h3 className="text-lg font-semibold mb-2">Waiting for teacher</h3>
+                  <p className="text-gray-400">The teacher's video will appear here when they start streaming</p>
+                  {!webRTCManager.isStreamInitialized() && (
+                    <Button 
+                      onClick={() => initializeMedia(true, true)} 
+                      className="mt-4"
+                      variant="outline"
+                    >
+                      <Video className="w-4 h-4 mr-2" />
+                      Enable My Camera
+                    </Button>
+                  )}
+                </div>
               )}
-              <div className="mt-6 p-4 bg-gray-700 rounded-lg">
-                <p className="text-sm text-gray-300">
-                  <strong>Students online:</strong> {students.length}
-                </p>
-                {activeQuiz && (
-                  <p className="text-sm text-yellow-300 mt-2">
-                    <strong>Active Quiz:</strong> There's a quiz available to answer
+
+              {/* Student's Own Video (if enabled) */}
+              {webRTCManager.isStreamInitialized() && (
+                <div className="mb-4">
+                  <Card className="bg-gray-800 border-gray-700">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm flex items-center justify-between">
+                        <span>Your Video</span>
+                        <div className="flex gap-2">
+                          <Button
+                            variant={videoEnabled ? "default" : "secondary"}
+                            size="sm"
+                            onClick={toggleVideo}
+                          >
+                            {videoEnabled ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
+                          </Button>
+                          <Button
+                            variant={audioEnabled ? "default" : "secondary"}
+                            size="sm"
+                            onClick={toggleAudio}
+                          >
+                            {audioEnabled ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+                          </Button>
+                        </div>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="relative aspect-video bg-gray-900 rounded-lg overflow-hidden">
+                        <video
+                          ref={localVideoRef}
+                          autoPlay
+                          playsInline
+                          muted
+                          className={`w-full h-full object-cover ${!videoEnabled ? 'hidden' : ''}`}
+                        />
+                        {!videoEnabled && (
+                          <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
+                            <VideoOff className="w-12 h-12 text-gray-500" />
+                            <span className="ml-2 text-gray-400">Your camera is off</span>
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+
+              {/* Waiting for Screen Share */}
+              {!isScreenShareActive && (
+                <div className="flex-1 flex flex-col items-center justify-center bg-gray-800 rounded-xl p-8">
+                  <Monitor className="w-24 h-24 text-gray-500 mb-4" />
+                  <h2 className="text-2xl font-semibold mb-2">Waiting for presenter</h2>
+                  <p className="text-gray-400 text-center max-w-md">
+                    The teacher will start sharing their screen shortly. You'll see the presentation here in real-time.
                   </p>
-                )}
-              </div>
+                  {classData.teacherName && (
+                    <p className="text-blue-400 mt-4">
+                      Teacher: {classData.teacherName}
+                    </p>
+                  )}
+                  <div className="mt-6 p-4 bg-gray-700 rounded-lg">
+                    <p className="text-sm text-gray-300">
+                      <strong>Students online:</strong> {students.length}
+                    </p>
+                    {activeQuiz && (
+                      <p className="text-sm text-yellow-300 mt-2">
+                        <strong>Active Quiz:</strong> There's a quiz available to answer
+                      </p>
+                    )}
+                    {remoteStreams.size > 0 && (
+                      <p className="text-sm text-green-300 mt-2">
+                        <strong>Video:</strong> Connected to teacher's camera
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1239,32 +1863,53 @@ export function ClassRoom() {
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm flex items-center justify-between">
                     <span>Participants ({students.length})</span>
+                    {isTeacher && (
+                      <Badge variant="outline" className="bg-green-500/20 text-green-400 border-green-500/30 text-xs">
+                        {activeConnections.size} connected
+                      </Badge>
+                    )}
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-2 max-h-60 overflow-y-auto">
-                    {students.map((student) => (
-                      <div key={student.id} className="flex items-center gap-3 p-2 rounded hover:bg-gray-600 transition-colors">
-                        <Avatar className="h-8 w-8">
-                          <AvatarFallback className="bg-green-600 text-xs">
-                            {student.studentName?.[0]?.toUpperCase() || 'S'}
-                          </AvatarFallback>
-                        </Avatar>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium truncate">
-                            {student.studentName}
-                            {student.studentId === classData?.teacherId && (
-                              <Badge variant="outline" className="ml-2 bg-blue-500/20 text-blue-400 border-blue-500/30 text-xs">
-                                Host
-                              </Badge>
-                            )}
-                          </p>
-                          <p className="text-xs text-gray-400">
-                            Joined {student.joinedAt ? new Date(student.joinedAt).toLocaleTimeString() : 'recently'}
-                          </p>
+                    {students.map((student) => {
+                      const isConnected = activeConnections.has(student.studentId);
+                      const hasVideo = remoteStreams.has(student.studentId);
+                      
+                      return (
+                        <div key={student.id} className="flex items-center gap-3 p-2 rounded hover:bg-gray-600 transition-colors">
+                          <Avatar className="h-8 w-8">
+                            <AvatarFallback className={`text-xs ${
+                              isConnected ? 'bg-green-600' : 'bg-gray-600'
+                            }`}>
+                              {student.studentName?.[0]?.toUpperCase() || 'S'}
+                            </AvatarFallback>
+                          </Avatar>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <p className="text-sm font-medium truncate">
+                                {student.studentName}
+                                {student.studentId === classData?.teacherId && (
+                                  <Badge variant="outline" className="ml-2 bg-blue-500/20 text-blue-400 border-blue-500/30 text-xs">
+                                    Host
+                                  </Badge>
+                                )}
+                              </p>
+                              {isConnected && (
+                                <div className="flex items-center gap-1">
+                                  <Wifi className="w-3 h-3 text-green-400" />
+                                  {hasVideo && <Video className="w-3 h-3 text-blue-400" />}
+                                </div>
+                              )}
+                            </div>
+                            <p className="text-xs text-gray-400">
+                              Joined {student.joinedAt ? new Date(student.joinedAt).toLocaleTimeString() : 'recently'}
+                              {!isConnected && student.studentId !== classData?.teacherId && ' • Offline'}
+                            </p>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </CardContent>
               </Card>
@@ -1305,6 +1950,65 @@ export function ClassRoom() {
                       <ScreenShare className="w-4 h-4 mr-2" />
                       {isScreenSharing ? 'Sharing...' : 'Share Screen'}
                     </Button>
+                    <div className="flex gap-2 pt-2">
+                      <Button
+                        variant={videoEnabled ? "default" : "secondary"}
+                        size="sm"
+                        onClick={toggleVideo}
+                        className="flex-1"
+                      >
+                        {videoEnabled ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
+                      </Button>
+                      <Button
+                        variant={audioEnabled ? "default" : "secondary"}
+                        size="sm"
+                        onClick={toggleAudio}
+                        className="flex-1"
+                      >
+                        {audioEnabled ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {!isTeacher && (
+                <Card className="bg-gray-700 border-gray-600">
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-sm">Your Controls</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <div className="flex gap-2">
+                      <Button
+                        variant={videoEnabled ? "default" : "secondary"}
+                        size="sm"
+                        onClick={toggleVideo}
+                        className="flex-1"
+                        disabled={!webRTCManager.isStreamInitialized()}
+                      >
+                        {videoEnabled ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
+                      </Button>
+                      <Button
+                        variant={audioEnabled ? "default" : "secondary"}
+                        size="sm"
+                        onClick={toggleAudio}
+                        className="flex-1"
+                        disabled={!webRTCManager.isStreamInitialized()}
+                      >
+                        {audioEnabled ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+                      </Button>
+                    </div>
+                    {!webRTCManager.isStreamInitialized() && (
+                      <Button 
+                        onClick={() => initializeMedia(true, true)} 
+                        size="sm" 
+                        variant="outline"
+                        className="w-full"
+                      >
+                        <Video className="w-4 h-4 mr-2" />
+                        Enable My Camera
+                      </Button>
+                    )}
                   </CardContent>
                 </Card>
               )}
@@ -1361,6 +2065,14 @@ export function ClassRoom() {
                       <p className="text-xs text-gray-400">Quiz Accuracy</p>
                     </div>
                   </div>
+                  {isTeacher && (
+                    <div className="mt-3 pt-3 border-t border-gray-600">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-400">Connected:</span>
+                        <span className="text-green-400">{activeConnections.size}/{students.length}</span>
+                      </div>
+                    </div>
+                  )}
                   {activeQuiz && (
                     <div className="mt-3 pt-3 border-t border-gray-600">
                       <div className="flex justify-between text-xs">
@@ -1454,6 +2166,36 @@ export function ClassRoom() {
                       </div>
                     </div>
                   )}
+
+                  {isTeacher && activeConnections.size > 0 && (
+                    <div className="mt-4">
+                      <h4 className="text-xs font-medium text-gray-400 mb-2">Connected Students</h4>
+                      <div className="space-y-2">
+                        {Array.from(activeConnections).slice(0, 3).map(studentId => {
+                          const student = students.find(s => s.studentId === studentId);
+                          return (
+                            <div key={studentId} className="flex items-center gap-2 text-xs p-2 bg-gray-600 rounded">
+                              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                              <Avatar className="h-6 w-6">
+                                <AvatarFallback className="text-xs bg-green-600">
+                                  {student?.studentName?.[0]?.toUpperCase() || 'S'}
+                                </AvatarFallback>
+                              </Avatar>
+                              <div className="flex-1">
+                                <p className="truncate">{student?.studentName || 'Student'}</p>
+                              </div>
+                              <Wifi className="w-3 h-3 text-green-400" />
+                            </div>
+                          );
+                        })}
+                        {activeConnections.size > 3 && (
+                          <div className="text-center text-xs text-gray-400">
+                            +{activeConnections.size - 3} more connected
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </TabsContent>
@@ -1462,7 +2204,6 @@ export function ClassRoom() {
       </div>
 
       {/* Quiz Creation Dialog */}
-      {/* Quiz Creation Dialog - SCROLLABLE VERSION */}
       <Dialog open={showQuizDialog} onOpenChange={setShowQuizDialog}>
         <DialogContent className="bg-gray-800 border-gray-700 text-white max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader className="flex-shrink-0">
@@ -1475,10 +2216,8 @@ export function ClassRoom() {
             </DialogDescription>
           </DialogHeader>
 
-          {/* Scrollable Content Area */}
           <div className="flex-1 overflow-y-auto pr-2 -mr-2 custom-scrollbar">
             <form onSubmit={handleCreateQuiz} className="space-y-6 pb-4">
-              {/* Question Section */}
               <div className="space-y-3">
                 <Label htmlFor="question" className="text-sm font-medium text-gray-300 flex items-center gap-2">
                   <span>Question</span>
@@ -1494,7 +2233,6 @@ export function ClassRoom() {
                 />
               </div>
 
-              {/* Options Grid */}
               <div className="space-y-4">
                 <Label className="text-sm font-medium text-gray-300">
                   Quiz Options
@@ -1519,7 +2257,6 @@ export function ClassRoom() {
                 </div>
               </div>
                 
-              {/* Correct Answer Section */}
               <div className="space-y-4">
                 <Label className="text-sm font-medium text-gray-300 flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 text-green-400" />
@@ -1576,7 +2313,6 @@ export function ClassRoom() {
                   ))}
                 </RadioGroup>
                 
-                {/* Correct Answer Preview */}
                 {newQuiz.correctAnswer !== null && newQuiz[`option${newQuiz.correctAnswer + 1}` as keyof typeof newQuiz] && (
                   <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
                     <div className="flex items-center gap-2 text-green-400">
@@ -1592,7 +2328,6 @@ export function ClassRoom() {
             </form>
           </div>
               
-          {/* Fixed Action Buttons */}
           <div className="flex-shrink-0 border-t border-gray-700 pt-4 mt-2">
             <div className="flex gap-3">
               <Button 
@@ -1813,7 +2548,7 @@ export function ClassRoom() {
         </DialogContent>
       </Dialog>
 
-      {/* Quiz Results Dialog - ENHANCED */}
+      {/* Quiz Results Dialog */}
       <Dialog open={showResultsDialog} onOpenChange={setShowResultsDialog}>
         <DialogContent className="bg-gray-800 border-gray-700 text-white max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
           <DialogHeader className="flex-shrink-0">
@@ -1830,7 +2565,6 @@ export function ClassRoom() {
             
           {activeQuiz && (
             <div className="flex-1 overflow-y-auto space-y-6 pr-2 -mr-2">
-              {/* Debug Info - Only show in development */}
               {process.env.NODE_ENV === 'development' && (
                 <div className="bg-blue-900/20 p-3 rounded-lg border border-blue-700">
                   <p className="text-sm text-blue-300">
@@ -1841,7 +2575,6 @@ export function ClassRoom() {
                 </div>
               )}
       
-              {/* Summary Stats */}
               <div className="grid grid-cols-3 gap-4">
                 <div className="bg-gray-700 p-4 rounded-lg text-center">
                   <p className="text-2xl font-bold text-blue-400">{totalResponses}</p>
@@ -1868,7 +2601,6 @@ export function ClassRoom() {
                 </div>
               </div>
             
-              {/* Response Breakdown */}
               <div>
                 <h4 className="font-medium mb-3 flex items-center gap-2">
                   <BarChart3 className="w-4 h-4" />
@@ -1911,7 +2643,6 @@ export function ClassRoom() {
                 </div>
               </div>
                 
-              {/* Student Responses */}
               <div>
                 <div className="flex items-center justify-between mb-3">
                   <h4 className="font-medium flex items-center gap-2">
@@ -1978,7 +2709,6 @@ export function ClassRoom() {
                 )}
               </div>
               
-              {/* Response Summary */}
               {quizResponses.length > 0 && (
                 <div className="bg-gray-700/50 p-4 rounded-lg border border-gray-600">
                   <h5 className="font-medium mb-2 text-sm text-gray-300">Quick Stats</h5>
@@ -2007,7 +2737,6 @@ export function ClassRoom() {
             </div>
           )}
       
-          {/* Fixed Action Buttons */}
           <div className="flex-shrink-0 border-t border-gray-700 pt-4 mt-2">
             <div className="flex gap-2">
               <Button 

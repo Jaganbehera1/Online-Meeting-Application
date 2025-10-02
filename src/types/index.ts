@@ -73,13 +73,27 @@ export interface StudentAttendance {
   joinedAt: Date;
   leftAt?: Date;
   duration?: number;
-  status: 'present' | 'absent';
+  status: 'present' | 'absent' | 'late';
 }
 export interface ScreenShare {
   id: string;
   classId: string;
   teacherId: string;
+  teacherName: string;
   isActive: boolean;
   startedAt: Date;
   endedAt?: Date;
+  streamId: string;
+  streamInfo?: any;
+}
+export interface WebRTCSignal {
+  id?: string;
+  classId: string;
+  fromUserId: string;
+  targetUserId: string;
+  type: 'offer' | 'answer' | 'ice-candidate' | 'join-request';
+  offer?: RTCSessionDescriptionInit;
+  answer?: RTCSessionDescriptionInit;
+  candidate?: RTCIceCandidateInit;
+  createdAt: Date;
 }

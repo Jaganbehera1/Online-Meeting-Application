@@ -9,6 +9,8 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { UserRole } from '@/types';
 import { GraduationCap, Video } from 'lucide-react';
 import { toast } from 'sonner';
+import { Check } from "lucide-react"
+import { motion } from "framer-motion"
 
 export function Auth() {
   const { signIn, signUp } = useAuth();
@@ -151,35 +153,84 @@ export function Auth() {
                   </div>
                   <div className="space-y-3">
                     <Label>I am a</Label>
-                    <RadioGroup
-                      value={signUpData.role}
-                      onValueChange={(value) => setSignUpData({ ...signUpData, role: value as UserRole })}
-                    >
-                      <div className="flex items-center space-x-2 border rounded-lg p-3 cursor-pointer hover:bg-slate-50">
-                        <RadioGroupItem value="student" id="student" />
-                        <Label htmlFor="student" className="flex-1 cursor-pointer">
-                          <div className="flex items-center gap-2">
-                            <GraduationCap className="w-5 h-5 text-blue-600" />
-                            <div>
-                              <div className="font-medium">Student</div>
-                              <div className="text-sm text-slate-500">Join classes and take quizzes</div>
+                      <RadioGroup
+                        value={signUpData.role}
+                        onValueChange={(value) =>
+                          setSignUpData({ ...signUpData, role: value as UserRole })
+                        }
+                        className="grid gap-4 sm:grid-cols-2"
+                      >
+                        {/* Student Card */}
+                        <Label
+                          htmlFor="student"
+                          className={`relative cursor-pointer rounded-xl border p-5 shadow-sm transition hover:shadow-md 
+                            ${signUpData.role === "student"
+                              ? "border-blue-600 bg-blue-50 dark:bg-blue-950"
+                              : "border-slate-200 bg-white dark:bg-slate-800"
+                            }`}
+                        >
+                          <RadioGroupItem value="student" id="student" className="sr-only" />
+                          
+                          {/* Animated Checkmark */}
+                          {signUpData.role === "student" && (
+                            <motion.div
+                              initial={{ opacity: 0, scale: 0.5 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              className="absolute top-3 right-3 rounded-full bg-blue-600 p-1 text-white shadow"
+                            >
+                              <Check className="h-4 w-4" />
+                            </motion.div>
+                          )}
+                      
+                          <div className="flex flex-col items-center gap-3">
+                            <GraduationCap className="w-9 h-9 text-blue-600" />
+                            <div className="text-center">
+                              <div className="font-semibold text-slate-900 dark:text-slate-100">
+                                Student
+                              </div>
+                              <div className="text-sm text-slate-500 dark:text-slate-400">
+                                Join classes and take quizzes
+                              </div>
                             </div>
                           </div>
                         </Label>
-                      </div>
-                      <div className="flex items-center space-x-2 border rounded-lg p-3 cursor-pointer hover:bg-slate-50">
-                        <RadioGroupItem value="teacher" id="teacher" />
-                        <Label htmlFor="teacher" className="flex-1 cursor-pointer">
-                          <div className="flex items-center gap-2">
-                            <Video className="w-5 h-5 text-green-600" />
-                            <div>
-                              <div className="font-medium">Teacher</div>
-                              <div className="text-sm text-slate-500">Create and manage classes</div>
+                        
+                        {/* Teacher Card */}
+                        <Label
+                          htmlFor="teacher"
+                          className={`relative cursor-pointer rounded-xl border p-5 shadow-sm transition hover:shadow-md 
+                            ${signUpData.role === "teacher"
+                              ? "border-green-600 bg-green-50 dark:bg-green-950"
+                              : "border-slate-200 bg-white dark:bg-slate-800"
+                            }`}
+                        >
+                          <RadioGroupItem value="teacher" id="teacher" className="sr-only" />
+                          
+                          {/* Animated Checkmark */}
+                          {signUpData.role === "teacher" && (
+                            <motion.div
+                              initial={{ opacity: 0, scale: 0.5 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              className="absolute top-3 right-3 rounded-full bg-green-600 p-1 text-white shadow"
+                            >
+                              <Check className="h-4 w-4" />
+                            </motion.div>
+                          )}
+                      
+                          <div className="flex flex-col items-center gap-3">
+                            <Video className="w-9 h-9 text-green-600" />
+                            <div className="text-center">
+                              <div className="font-semibold text-slate-900 dark:text-slate-100">
+                                Teacher
+                              </div>
+                              <div className="text-sm text-slate-500 dark:text-slate-400">
+                                Create and manage classes
+                              </div>
                             </div>
                           </div>
                         </Label>
-                      </div>
-                    </RadioGroup>
+                      </RadioGroup>
+
                   </div>
                   <Button type="submit" className="w-full" disabled={loading}>
                     {loading ? 'Creating Account...' : 'Create Account'}
