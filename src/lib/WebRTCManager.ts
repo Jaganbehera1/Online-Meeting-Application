@@ -149,20 +149,51 @@ async initializeLocalStream(audio: boolean = true, video: boolean = true): Promi
     return peerConnection;
   }
 
-  async createOffer(studentId: string): Promise<RTCSessionDescriptionInit> {
-    console.log('Creating offer for:', studentId);
-    const peerConnection = this.createPeerConnection(studentId);
-    
-    try {
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-      console.log('Offer created successfully, signaling state:', peerConnection.signalingState);
-      return offer;
-    } catch (error) {
-      console.error('Error creating offer:', error);
-      throw error;
+// In WebRTCManager.ts - enhance the createOffer method
+async createOffer(studentId: string): Promise<RTCSessionDescriptionInit> {
+  console.log('Creating offer for:', studentId);
+  
+  // Ensure any existing connection is properly closed
+  if (this.peerConnections.has(studentId)) {
+    const existingPC = this.peerConnections.get(studentId);
+    if (existingPC && existingPC.signalingState !== 'closed') {
+      console.log('Closing existing connection before creating new offer');
+      this.closeConnection(studentId);
+      // Small delay to ensure cleanup
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
+  
+  const peerConnection = this.createPeerConnection(studentId);
+  
+  try {
+    const offer = await peerConnection.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true
+    });
+    
+    await peerConnection.setLocalDescription(offer);
+    console.log('Offer created successfully, signaling state:', peerConnection.signalingState);
+    return offer;
+  } catch (error) {
+    console.error('Error creating offer:', error);
+    // Clean up on failure
+    this.closeConnection(studentId);
+    throw error;
+  }
+}
+
+// Add this method to check connection health
+checkConnectionHealth(studentId: string): boolean {
+  const pc = this.peerConnections.get(studentId);
+  if (!pc) return false;
+  
+  const connectionState = pc.connectionState;
+  const iceState = pc.iceConnectionState;
+  
+  return connectionState === 'connected' && 
+         (iceState === 'connected' || iceState === 'completed');
+}
 
 // In WebRTCManager.ts - Update the handleAnswer method
 async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promise<void> {

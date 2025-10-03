@@ -373,44 +373,78 @@ export function ClassRoom() {
     findClassByRoomId();
   }, [classId, currentUser, navigate, isTeacher]);
 
-  // WebRTC Signaling Listener
-  useEffect(() => {
-    if (!classData?.id || !currentUser) return;
+// Replace the current signaling listener with this improved version
+useEffect(() => {
+  if (!classData?.id || !currentUser) return;
 
-    console.log('Setting up WebRTC signaling listener for class:', classData.id);
+  console.log('Setting up WebRTC signaling listener for class:', classData.id);
 
-    const signalingQuery = query(
-      collection(db, 'webrtcSignals'),
-      where('classId', '==', classData.id),
-      where('targetUserId', '==', currentUser.uid),
-      orderBy('createdAt', 'desc'),
-      limit(50)
-    );
+  const processedSignalIds = new Set<string>();
+  const recentSignalKeys = new Map(); // Track recent signals by type + fromUserId
 
-    const unsubscribeSignaling = onSnapshot(signalingQuery, 
-      async (snapshot) => {
-        for (const docChange of snapshot.docChanges()) {
-          if (docChange.type === 'added') {
-            const signal = docChange.doc.data();
-            console.log('Received WebRTC signal:', signal.type, 'from:', signal.fromUserId);
-            await handleSignalingMessage(signal);
-            
-            // Clean up the signal after processing
-            try {
-              await deleteDoc(doc(db, 'webrtcSignals', docChange.doc.id));
-            } catch (error) {
-              console.error('Error deleting signal:', error);
+  const signalingQuery = query(
+    collection(db, 'webrtcSignals'),
+    where('classId', '==', classData.id),
+    where('targetUserId', '==', currentUser.uid),
+    orderBy('createdAt', 'desc'),
+    limit(50)
+  );
+
+  const unsubscribeSignaling = onSnapshot(signalingQuery, 
+    async (snapshot) => {
+      const now = Date.now();
+      
+      for (const docChange of snapshot.docChanges()) {
+        if (docChange.type === 'added') {
+          const signal = docChange.doc.data();
+          const signalId = docChange.doc.id;
+          
+          // Skip if already processed
+          if (processedSignalIds.has(signalId)) {
+            continue;
+          }
+          processedSignalIds.add(signalId);
+          
+          // Create unique key and check for duplicates within 3 seconds
+          const signalKey = `${signal.type}-${signal.fromUserId}`;
+          const lastSignalTime = recentSignalKeys.get(signalKey) || 0;
+          
+          if (now - lastSignalTime < 3000) {
+            console.log('Skipping duplicate signal (within 3s):', signalKey);
+            continue;
+          }
+          recentSignalKeys.set(signalKey, now);
+          
+          // Clean old entries from recentSignalKeys (older than 10 seconds)
+          for (const [key, timestamp] of recentSignalKeys.entries()) {
+            if (now - timestamp > 10000) {
+              recentSignalKeys.delete(key);
             }
           }
+          
+          console.log('Processing WebRTC signal:', signal.type, 'from:', signal.fromUserId);
+          await handleSignalingMessage(signal);
+          
+          // Clean up signal after processing
+          try {
+            await deleteDoc(doc(db, 'webrtcSignals', signalId));
+          } catch (error) {
+            console.error('Error deleting signal:', error);
+          }
         }
-      },
-      (error) => {
-        console.error('Error listening to WebRTC signals:', error);
       }
-    );
+    },
+    (error) => {
+      console.error('Error listening to WebRTC signals:', error);
+    }
+  );
 
-    return () => unsubscribeSignaling();
-  }, [classData?.id, currentUser, isTeacher]);
+  return () => {
+    unsubscribeSignaling();
+    webRTCManager.closeAllConnections();
+    webRTCManager.stopLocalStream();
+  };
+}, [classData?.id, currentUser, isTeacher]);
 
 // Handle WebRTC signaling messages
 // In ClassRoom.tsx - Update the handleSignalingMessage function
@@ -445,23 +479,35 @@ const handleSignalingMessage = async (signal: any) => {
     console.log('Processing WebRTC signal:', processedSignal.type, 'from:', processedSignal.fromUserId, 'state:', webRTCManager.getSignalingState(processedSignal.fromUserId));
 
     switch (processedSignal.type) {
+      // In handleSignalingMessage - enhance offer handling for students
       case 'offer':
         if (!isTeacher) {
           console.log('Handling offer from teacher:', processedSignal.fromUserId);
           
-          // Check if we already have a connection
+          // Close any existing connection first
           if (webRTCManager.hasConnection(processedSignal.fromUserId)) {
-            console.log('Already have connection with teacher, skipping offer');
-            return;
+            console.log('Closing existing connection with teacher');
+            webRTCManager.closeConnection(processedSignal.fromUserId);
+            await new Promise(resolve => setTimeout(resolve, 200));
           }
           
-          const answer = await webRTCManager.handleOffer(processedSignal.fromUserId, processedSignal.offer);
-          await sendSignalingMessage({
-            type: 'answer',
-            fromUserId: currentUser?.uid,
-            targetUserId: processedSignal.fromUserId,
-            answer: answer
-          });
+          try {
+            const answer = await webRTCManager.handleOffer(processedSignal.fromUserId, processedSignal.offer);
+            
+            // Wait a bit before sending answer
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            await sendSignalingMessage({
+              type: 'answer',
+              fromUserId: currentUser?.uid,
+              targetUserId: processedSignal.fromUserId,
+              answer: answer
+            });
+            
+            console.log('Answer sent to teacher successfully');
+          } catch (error) {
+            console.error('Error handling teacher offer:', error);
+          }
         }
         break;
 
@@ -524,43 +570,63 @@ const handleSignalingMessage = async (signal: any) => {
     }
   };
 
-// In ClassRoom.tsx - Update initiateConnectionWithStudent
 const initiateConnectionWithStudent = async (studentId: string) => {
   if (!isTeacher || !currentUser) return;
 
-  // Check if we already have a connection and it's in a valid state
+  // Enhanced connection state checking
   if (webRTCManager.hasConnection(studentId)) {
     const signalingState = webRTCManager.getSignalingState(studentId);
-    console.log('Already have connection with student:', studentId, 'state:', signalingState);
+    const connectionState = webRTCManager.getConnectionState(studentId);
     
-    // If connection is stable or connected, don't create a new one
-    if (signalingState === 'stable' || signalingState === 'connected') {
+    console.log('Existing connection state for', studentId, 'signaling:', signalingState, 'connection:', connectionState);
+    
+    // If connection is stable/connected, don't recreate
+    if (signalingState === 'stable' && connectionState === 'connected') {
       console.log('Connection already established with student:', studentId);
       return;
     }
     
-    // If connection is in a bad state, close it first
-    if (signalingState === 'closed' || signalingState === 'failed') {
-      console.log('Closing bad connection with student:', studentId);
+    // If connection is in progress, wait a bit
+    if (signalingState === 'have-local-offer' || signalingState === 'have-remote-offer') {
+      console.log('Connection in progress, waiting...');
+      return;
+    }
+    
+    // Close problematic connections
+    if (signalingState === 'closed' || connectionState === 'failed' || connectionState === 'disconnected') {
+      console.log('Closing problematic connection with student:', studentId);
       webRTCManager.closeConnection(studentId);
     }
   }
 
   try {
-    console.log('Initiating connection with student:', studentId);
+    console.log('Initiating new connection with student:', studentId);
+    
+    // Add a small delay to ensure previous connections are cleaned up
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
     const offer = await webRTCManager.createOffer(studentId);
+    
+    // Wait a bit for local description to be set
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
     await sendSignalingMessage({
       type: 'offer',
       fromUserId: currentUser.uid,
       targetUserId: studentId,
       offer: offer
     });
+    
+    console.log('Offer sent successfully to student:', studentId);
   } catch (error) {
     console.error('Error initiating connection:', error);
-    toast.error('Failed to connect with student');
     
-    // Clean up failed connection
+    // Clean up on failure
     webRTCManager.closeConnection(studentId);
+    
+    if (!(error as Error).message?.includes('duplicate')) {
+      toast.error('Failed to connect with student');
+    }
   }
 };
 
@@ -765,39 +831,90 @@ useEffect(() => {
     console.log('Student preparing to join class');
     
     const initializeStudentMedia = async () => {
+      let mediaInitialized = false;
+      
       try {
-        // Initialize media with at least one media type enabled
-        // For students, we'll enable audio by default but not video
-        await initializeMedia(true, false);
-        console.log('Student media initialized');
-        
-        // Wait a bit for teacher to be ready, then send join request
-        setTimeout(() => {
-          sendJoinRequest();
-        }, 3000);
+        // Try to initialize media (audio only for students by default)
+        mediaInitialized = await initializeMedia(true, false);
+        console.log('Student media initialized:', mediaInitialized);
       } catch (error) {
         console.error('Failed to initialize student media:', error);
-        // If media initialization fails, still try to send join request
-        // but only enable audio (no video) as a fallback
-        try {
-          await initializeMedia(true, false);
-        } catch (fallbackError) {
-          console.error('Fallback media initialization also failed:', fallbackError);
-          // If even audio fails, try without any media (just for signaling)
-          // This allows the student to join and see teacher's video even if their own media fails
-          console.log('Proceeding without local media - student can still view teacher');
+        // Continue without media - student can still view teacher
+      }
+      
+      // Send join request with retry logic
+      const sendJoinRequestWithRetry = async (attempt = 0) => {
+        if (attempt >= 3) {
+          console.log('Max join request attempts reached');
+          return;
         }
         
-        // Send join request even if media fails
-        setTimeout(() => {
-          sendJoinRequest();
-        }, 3000);
-      }
+        try {
+          console.log(`Sending join request (attempt ${attempt + 1})`);
+          await sendJoinRequest();
+          
+          // Wait before next attempt
+          setTimeout(() => {
+            if (!webRTCManager.hasConnection(classData.teacherId)) {
+              sendJoinRequestWithRetry(attempt + 1);
+            }
+          }, 2000);
+        } catch (error) {
+          console.error('Error sending join request:', error);
+        }
+      };
+      
+      // Start the join process
+      sendJoinRequestWithRetry();
     };
 
-    initializeStudentMedia();
+    // Delay initialization to ensure teacher is ready
+    const timer = setTimeout(() => {
+      initializeStudentMedia();
+    }, 2000);
+
+    return () => clearTimeout(timer);
   }
 }, [isTeacher, classData, currentUser]);
+
+// Add quiz listener for students
+useEffect(() => {
+  if (!classData?.id || isTeacher) return;
+
+  console.log('Setting up quiz listener for student');
+  
+  const quizzesQuery = query(
+    collection(db, 'quizzes'),
+    where('classId', '==', classData.id),
+    where('isActive', '==', true),
+    orderBy('createdAt', 'desc'),
+    limit(1)
+  );
+
+  const unsubscribeQuizzes = onSnapshot(quizzesQuery, (snapshot) => {
+    if (!snapshot.empty) {
+      const quizDoc = snapshot.docs[0];
+      const quizData = quizDoc.data();
+      
+      const activeQuiz: Quiz = {
+        id: quizDoc.id,
+        ...quizData,
+        createdAt: quizData.createdAt?.toDate(),
+      } as Quiz;
+      
+      // Set active quiz and show dialog
+      _setActiveQuiz(activeQuiz);
+      setShowQuizResponseDialog(true);
+      
+      console.log('Active quiz received:', activeQuiz.question);
+    } else {
+      _setActiveQuiz(null);
+      setShowQuizResponseDialog(false);
+    }
+  });
+
+  return () => unsubscribeQuizzes();
+}, [classData?.id, isTeacher]);
 
 // Initialize media streams
 const initializeMedia = async (audio: boolean = true, video: boolean = true) => {
