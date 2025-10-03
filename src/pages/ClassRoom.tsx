@@ -42,7 +42,6 @@ import {
   CheckCircle2,
   XCircle,
   BarChart3,
-  Send,
   Copy,
   Monitor,
   Eye,
@@ -148,7 +147,7 @@ export function ClassRoom() {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const screenShareRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [_localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const screenShareInstance = useRef(new EnhancedScreenShare());
 
