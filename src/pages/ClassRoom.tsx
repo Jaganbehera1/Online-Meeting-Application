@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -23,7 +23,8 @@ import {
   getDocs, 
   limit,
   orderBy,
-  deleteDoc
+  deleteDoc,
+  serverTimestamp
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { Class, Quiz, QuizResponse, StudentAttendance } from '@/types';
@@ -55,9 +56,6 @@ import { toast } from 'sonner';
 class EnhancedScreenShare {
   private localStream: MediaStream | null = null;
   private isSharing = false;
-  private lastMuteState: { video?: boolean, audio?: boolean } = {};
-  private muteDebounceTimer: NodeJS.Timeout | null = null;
-  private eventListeners: { type: string; listener: EventListener }[] = [];
 
   async startScreenShare(): Promise<MediaStream> {
     try {
@@ -67,91 +65,24 @@ class EnhancedScreenShare {
         video: {
           cursor: 'always',
           displaySurface: 'window',
-          frameRate: { ideal: 30, max: 60 },
-          width: { ideal: 1920, max: 1920 },
-          height: { ideal: 1080, max: 1080 }
+          frameRate: { ideal: 30, max: 60 }
         } as any,
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          sampleRate: 44100,
-          channelCount: 2
+          sampleRate: 44100
         }
       });
 
       console.log('Screen share stream obtained:', this.localStream.id);
       this.isSharing = true;
 
-      this.lastMuteState = {
-        video: !this.localStream.getVideoTracks()[0]?.enabled,
-        audio: !this.localStream.getAudioTracks()[0]?.enabled
-      };
-
       // Handle when user stops screen share via browser UI
-      const handleTrackEnded = () => {
-        console.log('Screen share ended by browser UI');
-        this.stopScreenShare();
-      };
-
-      this.localStream.getVideoTracks()[0].addEventListener('ended', handleTrackEnded);
-      this.eventListeners.push({ type: 'ended', listener: handleTrackEnded });
-
-      // Add debounced event listeners for track events
       this.localStream.getTracks().forEach(track => {
-        const handleMute = () => {
-          if (this.muteDebounceTimer) {
-            clearTimeout(this.muteDebounceTimer);
-          }
-          
-          this.muteDebounceTimer = setTimeout(() => {
-            const currentMuted = !track.enabled;
-            const previousMuted = this.lastMuteState[track.kind as keyof typeof this.lastMuteState];
-            
-            if (currentMuted !== previousMuted) {
-              console.log('Track muted:', track.kind);
-              this.lastMuteState[track.kind as keyof typeof this.lastMuteState] = currentMuted;
-              
-              window.dispatchEvent(new CustomEvent('screenshare-mute-change', {
-                detail: { kind: track.kind, muted: currentMuted }
-              }));
-            }
-          }, 100);
-        };
-
-        const handleUnmute = () => {
-          if (this.muteDebounceTimer) {
-            clearTimeout(this.muteDebounceTimer);
-          }
-          
-          this.muteDebounceTimer = setTimeout(() => {
-            const currentMuted = !track.enabled;
-            const previousMuted = this.lastMuteState[track.kind as keyof typeof this.lastMuteState];
-            
-            if (currentMuted !== previousMuted) {
-              console.log('Track unmuted:', track.kind);
-              this.lastMuteState[track.kind as keyof typeof this.lastMuteState] = currentMuted;
-              
-              window.dispatchEvent(new CustomEvent('screenshare-mute-change', {
-                detail: { kind: track.kind, muted: currentMuted }
-              }));
-            }
-          }, 100);
-        };
-
-        const handleEnded = () => {
-          console.log('Track ended:', track.kind);
+        track.addEventListener('ended', () => {
+          console.log('Screen share track ended');
           this.stopScreenShare();
-        };
-
-        track.addEventListener('mute', handleMute);
-        track.addEventListener('unmute', handleUnmute);
-        track.addEventListener('ended', handleEnded);
-
-        this.eventListeners.push(
-          { type: 'mute', listener: handleMute },
-          { type: 'unmute', listener: handleUnmute },
-          { type: 'ended', listener: handleEnded }
-        );
+        });
       });
 
       return this.localStream;
@@ -163,36 +94,13 @@ class EnhancedScreenShare {
 
   stopScreenShare() {
     console.log('Stopping screen share...');
-    
-    // Remove all event listeners first to prevent recursion
-    this.eventListeners.forEach(({ type, listener }) => {
-      if (this.localStream) {
-        this.localStream.getTracks().forEach(track => {
-          track.removeEventListener(type, listener);
-        });
-      }
-    });
-    this.eventListeners = [];
-    
-    if (this.muteDebounceTimer) {
-      clearTimeout(this.muteDebounceTimer);
-      this.muteDebounceTimer = null;
-    }
-    
     if (this.localStream) {
       this.localStream.getTracks().forEach(track => {
         track.stop();
       });
       this.localStream = null;
     }
-    
     this.isSharing = false;
-    this.lastMuteState = {};
-    
-    // Dispatch event only if we're actually stopping an active share
-    if (this.isSharing) {
-      window.dispatchEvent(new CustomEvent('screenshare-ended'));
-    }
   }
 
   isScreenSharing(): boolean {
@@ -201,39 +109,6 @@ class EnhancedScreenShare {
 
   getStream(): MediaStream | null {
     return this.localStream;
-  }
-
-  getStreamInfo() {
-    if (!this.localStream) return null;
-    
-    const videoTrack = this.localStream.getVideoTracks()[0];
-    const audioTrack = this.localStream.getAudioTracks()[0];
-    
-    const streamInfo: any = {
-      hasVideo: !!videoTrack,
-      hasAudio: !!audioTrack,
-      videoReadyState: videoTrack?.readyState,
-      audioReadyState: audioTrack?.readyState
-    };
-
-    if (videoTrack) {
-      streamInfo.videoSettings = {
-        width: videoTrack.getSettings().width,
-        height: videoTrack.getSettings().height,
-        frameRate: videoTrack.getSettings().frameRate,
-        deviceId: videoTrack.getSettings().deviceId
-      };
-    }
-
-    if (audioTrack) {
-      streamInfo.audioSettings = {
-        sampleRate: audioTrack.getSettings().sampleRate,
-        channelCount: audioTrack.getSettings().channelCount,
-        deviceId: audioTrack.getSettings().deviceId
-      };
-    }
-    
-    return streamInfo;
   }
 }
 
@@ -249,33 +124,31 @@ export function ClassRoom() {
   const [activeTab, setActiveTab] = useState('main');
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [streamInfo, setStreamInfo] = useState<any>(null);
   
   // WebRTC States
-  const [webRTCManager] = useState(new WebRTCManager());
+  const webRTCManager = useRef(new WebRTCManager());
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [activeConnections, setActiveConnections] = useState<Set<string>>(new Set());
-  const [_isWebRTCInitialized, setIsWebRTCInitialized] = useState(false);
+  const [isWebRTCInitialized, setIsWebRTCInitialized] = useState(false);
 
   // Quiz states
   const [showQuizDialog, setShowQuizDialog] = useState(false);
   const [showQuizResponseDialog, setShowQuizResponseDialog] = useState(false);
   const [showResultsDialog, setShowResultsDialog] = useState(false);
-  const [activeQuiz, _setActiveQuiz] = useState<Quiz | null>(null);
+  const [activeQuiz, setActiveQuiz] = useState<Quiz | null>(null);
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
   const [hasSubmitted, setHasSubmitted] = useState(false);
-  const [quizResponses, _setQuizResponses] = useState<QuizResponse[]>([]);
+  const [quizResponses, setQuizResponses] = useState<QuizResponse[]>([]);
   const [dismissedQuizzes, setDismissedQuizzes] = useState<Set<string>>(new Set());
   
   // Student states
-  const [students, _setStudents] = useState<StudentAttendance[]>([]);
-  const [activeScreenShare, setActiveScreenShare] = useState<any>(null);
+  const [students, setStudents] = useState<StudentAttendance[]>([]);
   const [isScreenShareActive, setIsScreenShareActive] = useState(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const screenShareRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const [_localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const screenShareInstance = useRef(new EnhancedScreenShare());
 
@@ -291,7 +164,7 @@ export function ClassRoom() {
   // Check if user is teacher based on class ownership
   const isTeacher = classData?.teacherId === currentUser?.uid;
 
-  // Find class by roomId instead of document ID
+  // Find class by roomId
   useEffect(() => {
     if (!classId) {
       toast.error('No class ID provided');
@@ -326,6 +199,7 @@ export function ClassRoom() {
           } as Class;
           setClassData(classDataObj);
 
+          // Start class if teacher and scheduled
           if (classDataObj.teacherId === currentUser?.uid && classDataObj.status === 'scheduled') {
             console.log('Starting class as teacher');
             await updateDoc(doc(db, 'classes', classDoc.id), { 
@@ -334,6 +208,7 @@ export function ClassRoom() {
             });
           }
 
+          // Record student attendance
           if (classDataObj.teacherId !== currentUser?.uid) {
             console.log('Recording student attendance for student:', currentUser?.uid);
             const attendanceQuery = query(
@@ -373,186 +248,279 @@ export function ClassRoom() {
     findClassByRoomId();
   }, [classId, currentUser, navigate, isTeacher]);
 
-// Replace the current signaling listener with this improved version
+// In ClassRoom.tsx - Replace the students useEffect
 useEffect(() => {
-  if (!classData?.id || !currentUser) return;
+  if (!classData?.id) return;
 
-  console.log('Setting up WebRTC signaling listener for class:', classData.id);
+  console.log('Fetching students for class:', classData.id);
 
-  const processedSignalIds = new Set<string>();
-  const recentSignalKeys = new Map(); // Track recent signals by type + fromUserId
-
-  const signalingQuery = query(
-    collection(db, 'webrtcSignals'),
+  const attendanceQuery = query(
+    collection(db, 'attendance'),
     where('classId', '==', classData.id),
-    where('targetUserId', '==', currentUser.uid),
-    orderBy('createdAt', 'desc'),
-    limit(50)
+    orderBy('joinedAt', 'desc')
   );
 
-  const unsubscribeSignaling = onSnapshot(signalingQuery, 
-    async (snapshot) => {
-      const now = Date.now();
+  const unsubscribeAttendance = onSnapshot(attendanceQuery, (snapshot) => {
+    const studentsData: StudentAttendance[] = [];
+    const uniqueStudentIds = new Set(); // Track unique student IDs
+    
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      const studentId = data.studentId;
       
-      for (const docChange of snapshot.docChanges()) {
-        if (docChange.type === 'added') {
-          const signal = docChange.doc.data();
-          const signalId = docChange.doc.id;
-          
-          // Skip if already processed
-          if (processedSignalIds.has(signalId)) {
-            continue;
-          }
-          processedSignalIds.add(signalId);
-          
-          // Create unique key and check for duplicates within 3 seconds
-          const signalKey = `${signal.type}-${signal.fromUserId}`;
-          const lastSignalTime = recentSignalKeys.get(signalKey) || 0;
-          
-          if (now - lastSignalTime < 3000) {
-            console.log('Skipping duplicate signal (within 3s):', signalKey);
-            continue;
-          }
-          recentSignalKeys.set(signalKey, now);
-          
-          // Clean old entries from recentSignalKeys (older than 10 seconds)
-          for (const [key, timestamp] of recentSignalKeys.entries()) {
-            if (now - timestamp > 10000) {
-              recentSignalKeys.delete(key);
+      // Only add if we haven't seen this student ID before
+      if (!uniqueStudentIds.has(studentId)) {
+        uniqueStudentIds.add(studentId);
+        studentsData.push({
+          id: doc.id,
+          ...data,
+          joinedAt: data.joinedAt?.toDate(),
+          leftAt: data.leftAt?.toDate()
+        } as StudentAttendance);
+      } else {
+        console.log('Skipping duplicate student:', studentId);
+      }
+    });
+    
+    console.log('Unique students loaded:', studentsData.length);
+    setStudents(studentsData);
+  });
+
+  return () => unsubscribeAttendance();
+}, [classData?.id]);
+// Add this useEffect to track student's quiz responses
+useEffect(() => {
+  if (!activeQuiz?.id || !currentUser || isTeacher) return;
+
+  // Check if student has already submitted this quiz
+  const checkExistingResponse = async () => {
+    try {
+      const responseQuery = query(
+        collection(db, 'quizResponses'),
+        where('quizId', '==', activeQuiz.id),
+        where('studentId', '==', currentUser.uid),
+        limit(1)
+      );
+
+      const responseSnapshot = await getDocs(responseQuery);
+      
+      if (!responseSnapshot.empty) {
+        const existingResponse = responseSnapshot.docs[0].data();
+        setSelectedOption(existingResponse.selectedOption);
+        setHasSubmitted(true);
+        console.log('Student has already submitted this quiz');
+      }
+    } catch (error) {
+      console.error('Error checking existing response:', error);
+    }
+  };
+
+  checkExistingResponse();
+}, [activeQuiz?.id, currentUser, isTeacher]);
+
+  // Fetch active quizzes
+  useEffect(() => {
+    if (!classData?.id) return;
+
+    console.log('Setting up quiz listener for class:', classData.id);
+
+    const quizzesQuery = query(
+      collection(db, 'quizzes'),
+      where('classId', '==', classData.id),
+      where('isActive', '==', true),
+      orderBy('createdAt', 'desc'),
+      limit(1)
+    );
+
+    const unsubscribeQuizzes = onSnapshot(quizzesQuery, (snapshot) => {
+      if (!snapshot.empty) {
+        const quizDoc = snapshot.docs[0];
+        const quizData = quizDoc.data();
+        
+        const activeQuizData: Quiz = {
+          id: quizDoc.id,
+          ...quizData,
+          createdAt: quizData.createdAt?.toDate(),
+        } as Quiz;
+        
+        setActiveQuiz(activeQuizData);
+        console.log('Active quiz received:', activeQuizData.question);
+
+        // Show quiz dialog to students automatically
+        if (!isTeacher && !dismissedQuizzes.has(quizDoc.id)) {
+          setShowQuizResponseDialog(true);
+        }
+      } else {
+        setActiveQuiz(null);
+      }
+    }, (error) => {
+      console.error('Error listening to quizzes:', error);
+    });
+
+    return () => unsubscribeQuizzes();
+  }, [classData?.id, isTeacher, dismissedQuizzes]);
+
+  // Fetch quiz responses
+  useEffect(() => {
+    if (!activeQuiz?.id || !isTeacher) return;
+
+    const responsesQuery = query(
+      collection(db, 'quizResponses'),
+      where('quizId', '==', activeQuiz.id),
+      orderBy('submittedAt', 'desc')
+    );
+
+    const unsubscribeResponses = onSnapshot(responsesQuery, (snapshot) => {
+      const responses: QuizResponse[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        responses.push({
+          id: doc.id,
+          ...data,
+          submittedAt: data.submittedAt?.toDate()
+        } as QuizResponse);
+      });
+      setQuizResponses(responses);
+    });
+
+    return () => unsubscribeResponses();
+  }, [activeQuiz?.id, isTeacher]);
+
+  // WebRTC Signaling Listener
+  useEffect(() => {
+    if (!classData?.id || !currentUser) return;
+
+    console.log('Setting up WebRTC signaling listener for class:', classData.id);
+
+    const processedSignalIds = new Set<string>();
+    const recentSignalKeys = new Map();
+
+    const signalingQuery = query(
+      collection(db, 'webrtcSignals'),
+      where('classId', '==', classData.id),
+      where('targetUserId', '==', currentUser.uid),
+      orderBy('createdAt', 'desc'),
+      limit(50)
+    );
+
+    const unsubscribeSignaling = onSnapshot(signalingQuery, 
+      async (snapshot) => {
+        const now = Date.now();
+        
+        for (const docChange of snapshot.docChanges()) {
+          if (docChange.type === 'added') {
+            const signal = docChange.doc.data();
+            const signalId = docChange.doc.id;
+            
+            // Skip if already processed
+            if (processedSignalIds.has(signalId)) continue;
+            processedSignalIds.add(signalId);
+            
+            // Create unique key and check for duplicates within 3 seconds
+            const signalKey = `${signal.type}-${signal.fromUserId}`;
+            const lastSignalTime = recentSignalKeys.get(signalKey) || 0;
+            
+            if (now - lastSignalTime < 3000) {
+              console.log('Skipping duplicate signal:', signalKey);
+              continue;
+            }
+            recentSignalKeys.set(signalKey, now);
+            
+            console.log('Processing WebRTC signal:', signal.type, 'from:', signal.fromUserId);
+            await handleSignalingMessage(signal);
+            
+            // Clean up signal after processing
+            try {
+              await deleteDoc(doc(db, 'webrtcSignals', signalId));
+            } catch (error) {
+              console.error('Error deleting signal:', error);
             }
           }
-          
-          console.log('Processing WebRTC signal:', signal.type, 'from:', signal.fromUserId);
-          await handleSignalingMessage(signal);
-          
-          // Clean up signal after processing
-          try {
-            await deleteDoc(doc(db, 'webrtcSignals', signalId));
-          } catch (error) {
-            console.error('Error deleting signal:', error);
-          }
         }
+      },
+      (error) => {
+        console.error('Error listening to WebRTC signals:', error);
       }
-    },
-    (error) => {
-      console.error('Error listening to WebRTC signals:', error);
-    }
-  );
+    );
 
-  return () => {
-    unsubscribeSignaling();
-    webRTCManager.closeAllConnections();
-    webRTCManager.stopLocalStream();
+    return () => {
+      unsubscribeSignaling();
+      webRTCManager.current.closeAllConnections();
+      webRTCManager.current.stopLocalStream();
+    };
+  }, [classData?.id, currentUser, isTeacher]);
+
+  // Handle WebRTC signaling messages
+  const handleSignalingMessage = async (signal: any) => {
+    try {
+      // Skip if this is our own signal
+      if (signal.fromUserId === currentUser?.uid) return;
+
+      console.log('Processing WebRTC signal:', signal.type, 'from:', signal.fromUserId);
+
+      switch (signal.type) {
+        case 'offer':
+          if (!isTeacher) {
+            console.log('Handling offer from teacher:', signal.fromUserId);
+            
+            try {
+              const answer = await webRTCManager.current.handleOffer(signal.fromUserId, {
+                type: signal.offer.type,
+                sdp: signal.offer.sdp
+              });
+              
+              await sendSignalingMessage({
+                type: 'answer',
+                fromUserId: currentUser?.uid,
+                targetUserId: signal.fromUserId,
+                answer: answer
+              });
+              
+              console.log('Answer sent to teacher successfully');
+            } catch (error) {
+              console.error('Error handling teacher offer:', error);
+            }
+          }
+          break;
+
+        case 'answer':
+          if (isTeacher) {
+            console.log('Handling answer from student:', signal.fromUserId);
+            
+            try {
+              await webRTCManager.current.handleAnswer(signal.fromUserId, {
+                type: signal.answer.type,
+                sdp: signal.answer.sdp
+              });
+            } catch (error) {
+              console.error('Error handling student answer:', error);
+            }
+          }
+          break;
+
+        case 'ice-candidate':
+          console.log('Handling ICE candidate from:', signal.fromUserId);
+          await webRTCManager.current.addIceCandidate(signal.fromUserId, signal.candidate);
+          break;
+
+        case 'join-request':
+          if (isTeacher) {
+            console.log('Handling join request from student:', signal.fromUserId);
+            
+            // Check if we already have a healthy connection
+            if (webRTCManager.current.isConnectionHealthy(signal.fromUserId)) {
+              console.log('Already connected to student:', signal.fromUserId);
+              return;
+            }
+            
+            await initiateConnectionWithStudent(signal.fromUserId);
+          }
+          break;
+      }
+    } catch (error) {
+      console.error('Error handling signaling message:', error);
+    }
   };
-}, [classData?.id, currentUser, isTeacher]);
-
-// Handle WebRTC signaling messages
-// In ClassRoom.tsx - Update the handleSignalingMessage function
-const handleSignalingMessage = async (signal: any) => {
-  try {
-    // Skip if this is our own signal
-    if (signal.fromUserId === currentUser?.uid) {
-      return;
-    }
-
-    // Reconstruct RTC objects from plain objects
-    let processedSignal = { ...signal };
-    
-    if (signal.offer) {
-      processedSignal.offer = new RTCSessionDescription({
-        type: signal.offer.type,
-        sdp: signal.offer.sdp
-      });
-    }
-    
-    if (signal.answer) {
-      processedSignal.answer = new RTCSessionDescription({
-        type: signal.answer.type,
-        sdp: signal.answer.sdp
-      });
-    }
-    
-    if (signal.candidate) {
-      processedSignal.candidate = signal.candidate; // Already a plain object
-    }
-
-    console.log('Processing WebRTC signal:', processedSignal.type, 'from:', processedSignal.fromUserId, 'state:', webRTCManager.getSignalingState(processedSignal.fromUserId));
-
-    switch (processedSignal.type) {
-      // In handleSignalingMessage - enhance offer handling for students
-      case 'offer':
-        if (!isTeacher) {
-          console.log('Handling offer from teacher:', processedSignal.fromUserId);
-          
-          // Close any existing connection first
-          if (webRTCManager.hasConnection(processedSignal.fromUserId)) {
-            console.log('Closing existing connection with teacher');
-            webRTCManager.closeConnection(processedSignal.fromUserId);
-            await new Promise(resolve => setTimeout(resolve, 200));
-          }
-          
-          try {
-            const answer = await webRTCManager.handleOffer(processedSignal.fromUserId, processedSignal.offer);
-            
-            // Wait a bit before sending answer
-            await new Promise(resolve => setTimeout(resolve, 100));
-            
-            await sendSignalingMessage({
-              type: 'answer',
-              fromUserId: currentUser?.uid,
-              targetUserId: processedSignal.fromUserId,
-              answer: answer
-            });
-            
-            console.log('Answer sent to teacher successfully');
-          } catch (error) {
-            console.error('Error handling teacher offer:', error);
-          }
-        }
-        break;
-
-      case 'answer':
-        if (isTeacher) {
-          console.log('Handling answer from student:', processedSignal.fromUserId);
-          
-          // Check connection state before handling answer
-          const signalingState = webRTCManager.getSignalingState(processedSignal.fromUserId);
-          if (signalingState !== 'have-local-offer') {
-            console.warn(`Cannot handle answer in state: ${signalingState}, expected: have-local-offer. This is likely a duplicate.`);
-            return; // Silently ignore duplicate answers
-          }
-          
-          await webRTCManager.handleAnswer(processedSignal.fromUserId, processedSignal.answer);
-        }
-        break;
-
-      case 'ice-candidate':
-        console.log('Handling ICE candidate from:', processedSignal.fromUserId);
-        await webRTCManager.addIceCandidate(processedSignal.fromUserId, processedSignal.candidate);
-        break;
-
-      case 'join-request':
-        if (isTeacher) {
-          console.log('Handling join request from student:', processedSignal.fromUserId);
-          
-          // Check if we already have a connection with this student
-          if (webRTCManager.hasConnection(processedSignal.fromUserId)) {
-            console.log('Already connected to student:', processedSignal.fromUserId);
-            return;
-          }
-          
-          await initiateConnectionWithStudent(processedSignal.fromUserId);
-        }
-        break;
-    }
-  } catch (error) {
-    console.error('Error handling signaling message:', error);
-    // Don't show error toast for duplicate messages
-    if (!(error as Error).message?.includes('duplicate') && !(error as Error).name?.includes('InvalidState')) {
-      toast.error('Failed to process connection message');
-    }
-  }
-};
 
   // Send signaling message
   const sendSignalingMessage = async (message: any) => {
@@ -562,7 +530,7 @@ const handleSignalingMessage = async (signal: any) => {
       await addDoc(collection(db, 'webrtcSignals'), {
         ...message,
         classId: classData.id,
-        createdAt: Timestamp.fromDate(new Date())
+        createdAt: serverTimestamp()
       });
       console.log('Sent WebRTC signal:', message.type);
     } catch (error) {
@@ -570,68 +538,29 @@ const handleSignalingMessage = async (signal: any) => {
     }
   };
 
-const initiateConnectionWithStudent = async (studentId: string) => {
-  if (!isTeacher || !currentUser) return;
+  const initiateConnectionWithStudent = async (studentId: string) => {
+    if (!isTeacher || !currentUser) return;
 
-  // Enhanced connection state checking
-  if (webRTCManager.hasConnection(studentId)) {
-    const signalingState = webRTCManager.getSignalingState(studentId);
-    const connectionState = webRTCManager.getConnectionState(studentId);
-    
-    console.log('Existing connection state for', studentId, 'signaling:', signalingState, 'connection:', connectionState);
-    
-    // If connection is stable/connected, don't recreate
-    if (signalingState === 'stable' && connectionState === 'connected') {
-      console.log('Connection already established with student:', studentId);
-      return;
-    }
-    
-    // If connection is in progress, wait a bit
-    if (signalingState === 'have-local-offer' || signalingState === 'have-remote-offer') {
-      console.log('Connection in progress, waiting...');
-      return;
-    }
-    
-    // Close problematic connections
-    if (signalingState === 'closed' || connectionState === 'failed' || connectionState === 'disconnected') {
-      console.log('Closing problematic connection with student:', studentId);
-      webRTCManager.closeConnection(studentId);
-    }
-  }
-
-  try {
-    console.log('Initiating new connection with student:', studentId);
-    
-    // Add a small delay to ensure previous connections are cleaned up
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    const offer = await webRTCManager.createOffer(studentId);
-    
-    // Wait a bit for local description to be set
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
-    await sendSignalingMessage({
-      type: 'offer',
-      fromUserId: currentUser.uid,
-      targetUserId: studentId,
-      offer: offer
-    });
-    
-    console.log('Offer sent successfully to student:', studentId);
-  } catch (error) {
-    console.error('Error initiating connection:', error);
-    
-    // Clean up on failure
-    webRTCManager.closeConnection(studentId);
-    
-    if (!(error as Error).message?.includes('duplicate')) {
+    try {
+      console.log('Initiating connection with student:', studentId);
+      const offer = await webRTCManager.current.createOffer(studentId);
+      
+      await sendSignalingMessage({
+        type: 'offer',
+        fromUserId: currentUser.uid,
+        targetUserId: studentId,
+        offer: offer
+      });
+      
+      console.log('Offer sent successfully to student:', studentId);
+    } catch (error) {
+      console.error('Error initiating connection:', error);
       toast.error('Failed to connect with student');
     }
-  }
-};
+  };
 
   // Student join request
-  const sendJoinRequest = async () => {
+  const sendJoinRequest = useCallback(async () => {
     if (isTeacher || !classData || !currentUser) return;
 
     console.log('Sending join request to teacher');
@@ -640,7 +569,7 @@ const initiateConnectionWithStudent = async (studentId: string) => {
       fromUserId: currentUser.uid,
       targetUserId: classData.teacherId
     });
-  };
+  }, [isTeacher, classData, currentUser]);
 
   // WebRTC Event Listeners
   useEffect(() => {
@@ -649,7 +578,7 @@ const initiateConnectionWithStudent = async (studentId: string) => {
       console.log('Remote stream added event:', studentId);
       setRemoteStreams(prev => new Map(prev).set(studentId, stream));
       
-      // Update video element when it's available
+      // Update video element
       setTimeout(() => {
         const videoElement = remoteVideoRefs.current.get(studentId);
         if (videoElement && stream) {
@@ -725,479 +654,155 @@ const initiateConnectionWithStudent = async (studentId: string) => {
     };
   }, [currentUser, isTeacher]);
 
-// Initialize WebRTC for teacher
-useEffect(() => {
-  if (isTeacher) {
-    const initializeTeacherMedia = async () => {
-      try {
-        await initializeMedia(true, true);
-        console.log('Teacher media initialized successfully');
-      } catch (error) {
-        console.error('Failed to initialize teacher media:', error);
-      }
-    };
-    initializeTeacherMedia();
-  }
-}, [isTeacher]);
-
-// In ClassRoom.tsx - Update the WebRTC Signaling Listener
-useEffect(() => {
-  if (!classData?.id || !currentUser) return;
-
-  console.log('Setting up WebRTC signaling listener for class:', classData.id);
-
-  const processedSignalIds = new Set<string>();
-  const recentSignals = new Map(); // Track recent signals by type and fromUserId
-
-  const signalingQuery = query(
-    collection(db, 'webrtcSignals'),
-    where('classId', '==', classData.id),
-    where('targetUserId', '==', currentUser.uid),
-    orderBy('createdAt', 'desc'),
-    limit(20)
-  );
-
-  const unsubscribeSignaling = onSnapshot(signalingQuery, 
-    async (snapshot) => {
-      for (const docChange of snapshot.docChanges()) {
-        if (docChange.type === 'added') {
-          const signal = docChange.doc.data();
-          const signalId = docChange.doc.id;
-          
-          // Prevent processing the same signal multiple times
-          if (processedSignalIds.has(signalId)) {
-            continue;
-          }
-          processedSignalIds.add(signalId);
-          
-          // Create a unique key for this type of signal to prevent duplicates
-          const signalKey = `${signal.type}-${signal.fromUserId}`;
-          const now = Date.now();
-          const lastSignalTime = recentSignals.get(signalKey) || 0;
-          
-          // Prevent processing the same signal type from the same user within 2 seconds
-          if (now - lastSignalTime < 2000) {
-            console.log('Skipping duplicate signal:', signalKey);
-            continue;
-          }
-          recentSignals.set(signalKey, now);
-          
-          console.log('Received WebRTC signal:', signal.type, 'from:', signal.fromUserId);
-          await handleSignalingMessage(signal);
-          
-          // Clean up the signal after processing
-          try {
-            await deleteDoc(doc(db, 'webrtcSignals', signalId));
-          } catch (error) {
-            console.error('Error deleting signal:', error);
-          }
-        }
-      }
-    },
-    (error) => {
-      console.error('Error listening to WebRTC signals:', error);
-    }
-  );
-
-  return () => {
-    unsubscribeSignaling();
-    // Clean up WebRTC connections when component unmounts
-    webRTCManager.closeAllConnections();
-    webRTCManager.stopLocalStream();
-  };
-}, [classData?.id, currentUser, isTeacher]);
-
-// Monitor connection states
-useEffect(() => {
-  const intervalId = setInterval(() => {
+  // Initialize WebRTC for teacher
+  useEffect(() => {
     if (isTeacher) {
-      const activeConnections = webRTCManager.getActiveConnections();
-      console.log('Active connections:', activeConnections.length);
-      
-      activeConnections.forEach(studentId => {
-        const state = webRTCManager.getConnectionState(studentId);
-        const signalingState = webRTCManager.getSignalingState(studentId);
-        console.log(`Student ${studentId}: connection=${state}, signaling=${signalingState}`);
-      });
-    }
-  }, 10000); // Log every 10 seconds
-
-  return () => clearInterval(intervalId);
-}, [isTeacher]);
-
-// Student auto-join when class is loaded
-useEffect(() => {
-  if (!isTeacher && classData && currentUser) {
-    console.log('Student preparing to join class');
-    
-    const initializeStudentMedia = async () => {
-      let mediaInitialized = false;
-      
-      try {
-        // Try to initialize media (audio only for students by default)
-        mediaInitialized = await initializeMedia(true, false);
-        console.log('Student media initialized:', mediaInitialized);
-      } catch (error) {
-        console.error('Failed to initialize student media:', error);
-        // Continue without media - student can still view teacher
-      }
-      
-      // Send join request with retry logic
-      const sendJoinRequestWithRetry = async (attempt = 0) => {
-        if (attempt >= 3) {
-          console.log('Max join request attempts reached');
-          return;
-        }
-        
+      const initializeTeacherMedia = async () => {
         try {
-          console.log(`Sending join request (attempt ${attempt + 1})`);
-          await sendJoinRequest();
-          
-          // Wait before next attempt
-          setTimeout(() => {
-            if (!webRTCManager.hasConnection(classData.teacherId)) {
-              sendJoinRequestWithRetry(attempt + 1);
-            }
-          }, 2000);
+          await initializeMedia(true, true);
+          console.log('Teacher media initialized successfully');
         } catch (error) {
-          console.error('Error sending join request:', error);
+          console.error('Failed to initialize teacher media:', error);
         }
       };
-      
-      // Start the join process
-      sendJoinRequestWithRetry();
-    };
-
-    // Delay initialization to ensure teacher is ready
-    const timer = setTimeout(() => {
-      initializeStudentMedia();
-    }, 2000);
-
-    return () => clearTimeout(timer);
-  }
-}, [isTeacher, classData, currentUser]);
-
-// Add quiz listener for students
-useEffect(() => {
-  if (!classData?.id || isTeacher) return;
-
-  console.log('Setting up quiz listener for student');
-  
-  const quizzesQuery = query(
-    collection(db, 'quizzes'),
-    where('classId', '==', classData.id),
-    where('isActive', '==', true),
-    orderBy('createdAt', 'desc'),
-    limit(1)
-  );
-
-  const unsubscribeQuizzes = onSnapshot(quizzesQuery, (snapshot) => {
-    if (!snapshot.empty) {
-      const quizDoc = snapshot.docs[0];
-      const quizData = quizDoc.data();
-      
-      const activeQuiz: Quiz = {
-        id: quizDoc.id,
-        ...quizData,
-        createdAt: quizData.createdAt?.toDate(),
-      } as Quiz;
-      
-      // Set active quiz and show dialog
-      _setActiveQuiz(activeQuiz);
-      setShowQuizResponseDialog(true);
-      
-      console.log('Active quiz received:', activeQuiz.question);
-    } else {
-      _setActiveQuiz(null);
-      setShowQuizResponseDialog(false);
+      initializeTeacherMedia();
     }
-  });
+  }, [isTeacher]);
 
-  return () => unsubscribeQuizzes();
-}, [classData?.id, isTeacher]);
+  // Student auto-join when class is loaded
+  useEffect(() => {
+    if (!isTeacher && classData && currentUser) {
+      console.log('Student preparing to join class');
+      
+      const initializeStudentMedia = async () => {
+        try {
+          await initializeMedia(true, false);
+          console.log('Student media initialized');
+          
+          // Send join request after a delay
+          setTimeout(() => {
+            sendJoinRequest();
+          }, 2000);
+        } catch (error) {
+          console.error('Failed to initialize student media:', error);
+          // Still try to send join request
+          setTimeout(() => {
+            sendJoinRequest();
+          }, 2000);
+        }
+      };
 
-// Initialize media streams
-const initializeMedia = async (audio: boolean = true, video: boolean = true) => {
-  try {
-    setMediaError(null);
-    
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setMediaError('Media devices not supported in this browser');
+      initializeStudentMedia();
+    }
+  }, [isTeacher, classData, currentUser, sendJoinRequest]);
+
+  // Initialize media streams
+  const initializeMedia = async (audio: boolean = true, video: boolean = true): Promise<boolean> => {
+    try {
+      setMediaError(null);
+      
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setMediaError('Media devices not supported in this browser');
+        return false;
+      }
+
+      console.log('Requesting media permissions for audio:', audio, 'video:', video);
+      const stream = await webRTCManager.current.initializeLocalStream(audio, video);
+      setLocalStream(stream);
+      setIsWebRTCInitialized(true);
+      
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+      
+      setVideoEnabled(video);
+      setAudioEnabled(audio);
+      
+      console.log('Media stream initialized successfully');
+      return true;
+      
+    } catch (error: any) {
+      console.error('Error accessing media devices:', error);
+      
+      if (error.name === 'NotAllowedError') {
+        setMediaError('Camera/microphone access denied. Please allow permissions in your browser.');
+      } else if (error.name === 'NotFoundError') {
+        setMediaError('No camera/microphone found. Please connect a device to use these features.');
+      } else {
+        setMediaError('Failed to access camera/microphone. Please check your device permissions.');
+      }
       return false;
     }
-
-    // Validate that at least one media type is requested
-    if (!audio && !video) {
-      console.warn('Both audio and video are disabled, enabling audio by default');
-      audio = true; // Enable audio as fallback
-    }
-
-    console.log('Requesting media permissions for audio:', audio, 'video:', video);
-    const stream = await webRTCManager.initializeLocalStream(audio, video);
-    setLocalStream(stream);
-    setIsWebRTCInitialized(true);
-    
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = stream;
-    }
-    
-    if (isTeacher) {
-      setVideoEnabled(video);
-      setAudioEnabled(audio);
-    } else {
-      // For students, set the enabled states based on what was actually requested
-      setVideoEnabled(video);
-      setAudioEnabled(audio);
-    }
-    
-    console.log('Media stream initialized successfully');
-    return true;
-    
-  } catch (error: any) {
-    console.error('Error accessing media devices:', error);
-    
-    if (error.name === 'NotAllowedError') {
-      setMediaError('Camera/microphone access denied. Please allow permissions in your browser.');
-      toast.error('Camera/microphone access denied. Please allow permissions to use these features.');
-    } else if (error.name === 'NotFoundError') {
-      setMediaError('No camera/microphone found. Please connect a device to use these features.');
-      toast.error('No camera/microphone found. Please connect a device to use these features.');
-    } else if (error.name === 'NotReadableError') {
-      setMediaError('Camera/microphone is in use by another application. Please close other applications and try again.');
-      toast.error('Camera/microphone is in use by another application. Please close other applications and try again.');
-    } else if (error.name === 'OverconstrainedError') {
-      setMediaError('Cannot satisfy the requested media constraints. Trying with different settings...');
-      console.warn('Media constraints cannot be satisfied, trying fallback...');
-      // Try with more permissive constraints
-      return await initializeMediaWithFallback(audio, video);
-    } else {
-      setMediaError('Failed to access camera/microphone. Please check your device permissions.');
-      toast.error('Failed to access camera/microphone. Please check your device permissions.');
-    }
-    return false;
-  }
-};
-
-// Fallback media initialization with more permissive constraints
-const initializeMediaWithFallback = async (audio: boolean, video: boolean): Promise<boolean> => {
-  try {
-    console.log('Trying fallback media initialization...');
-    
-    // If both failed, try just audio
-    if (!audio && !video) {
-      audio = true;
-    }
-    
-    // If video failed but was requested, try with lower constraints
-    if (video) {
-      try {
-        const stream = await webRTCManager.initializeLocalStream(audio, true);
-        setLocalStream(stream);
-        setIsWebRTCInitialized(true);
-        
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-        }
-        
-        setVideoEnabled(true);
-        setAudioEnabled(audio);
-        console.log('Fallback media initialization successful');
-        return true;
-      } catch (videoError) {
-        console.warn('Video initialization failed, trying audio only...');
-        // If video still fails, try audio only
-        return await initializeMediaWithFallback(audio, false);
-      }
-    }
-    
-    // Final attempt with just audio
-    const stream = await webRTCManager.initializeLocalStream(audio, false);
-    setLocalStream(stream);
-    setIsWebRTCInitialized(true);
-    
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = stream;
-    }
-    
-    setVideoEnabled(false);
-    setAudioEnabled(audio);
-    console.log('Audio-only media initialization successful');
-    return true;
-    
-  } catch (fallbackError) {
-    console.error('All media initialization attempts failed:', fallbackError);
-    setMediaError('Unable to access any media devices. You can still join the class to view the teacher.');
-    return false;
-  }
-};
+  };
 
   const toggleVideo = async () => {
     const newVideoState = !videoEnabled;
     
-    if (!webRTCManager.isStreamInitialized()) {
+    if (!webRTCManager.current.isStreamInitialized()) {
       await initializeMedia(audioEnabled, true);
     } else {
-      webRTCManager.updateLocalStreamTracks(audioEnabled, newVideoState);
+      webRTCManager.current.updateLocalStreamTracks(audioEnabled, newVideoState);
     }
     
     setVideoEnabled(newVideoState);
-
-    if (newVideoState) {
-      toast.success('Camera turned on');
-    } else {
-      toast.info('Camera turned off');
-    }
+    toast.success(newVideoState ? 'Camera turned on' : 'Camera turned off');
   };
 
   const toggleAudio = async () => {
     const newAudioState = !audioEnabled;
     
-    if (!webRTCManager.isStreamInitialized()) {
+    if (!webRTCManager.current.isStreamInitialized()) {
       await initializeMedia(true, videoEnabled);
     } else {
-      webRTCManager.updateLocalStreamTracks(newAudioState, videoEnabled);
+      webRTCManager.current.updateLocalStreamTracks(newAudioState, videoEnabled);
     }
     
     setAudioEnabled(newAudioState);
-
-    if (newAudioState) {
-      toast.success('Microphone turned on');
-    } else {
-      toast.info('Microphone turned off');
-    }
+    toast.success(newAudioState ? 'Microphone turned on' : 'Microphone turned off');
   };
 
-const handleStartScreenShare = async () => {
-  try {
-    console.log('Starting screen share...');
-    
-    const stream = await screenShareInstance.current.startScreenShare();
-    setScreenStream(stream);
-    setIsScreenSharing(true);
+  const handleStartScreenShare = async () => {
+    try {
+      console.log('Starting screen share...');
+      
+      const stream = await screenShareInstance.current.startScreenShare();
+      setScreenStream(stream);
+      setIsScreenSharing(true);
 
-    const info = screenShareInstance.current.getStreamInfo();
-    setStreamInfo(info);
-    console.log('Screen share stream info:', info);
-
-    if (screenShareRef.current) {
-      screenShareRef.current.srcObject = stream;
-      console.log('Screen share stream attached to video element');
-    }
-
-    // Record screen share in database for students
-    if (isTeacher && classData) {
-      try {
-        // First, deactivate any existing screen shares
-        const existingSharesQuery = query(
-          collection(db, 'screenShares'),
-          where('classId', '==', classData.id),
-          where('isActive', '==', true)
-        );
-        
-        const existingShares = await getDocs(existingSharesQuery);
-        const updatePromises = existingShares.docs.map(doc => 
-          updateDoc(doc.ref, {
-            isActive: false,
-            endedAt: Timestamp.fromDate(new Date())
-          })
-        );
-        
-        await Promise.all(updatePromises);
-
-        // Create new screen share record
-        const screenShareData: any = {
-          classId: classData.id,
-          teacherId: currentUser?.uid,
-          teacherName: currentUser?.displayName || currentUser?.email,
-          isActive: true,
-          startedAt: Timestamp.fromDate(new Date()),
-          streamId: `screenshare-${Date.now()}`
-        };
-
-        if (info) {
-          const cleanStreamInfo = JSON.parse(JSON.stringify(info));
-          screenShareData.streamInfo = cleanStreamInfo;
-        }
-
-        await addDoc(collection(db, 'screenShares'), screenShareData);
-        
-        console.log('Screen share recorded in database');
-      } catch (dbError: any) {
-        console.error('Error recording screen share in database:', dbError);
-        toast.warning('Screen sharing started, but database update failed. Students may not see the share indicator.');
+      if (screenShareRef.current) {
+        screenShareRef.current.srcObject = stream;
       }
-    }
 
-    toast.success('Screen sharing started - Students can now see your screen');
-    
-    // Add event listener for mute changes
-    const handleMuteChange = (event: CustomEvent) => {
-      const { kind, muted } = event.detail;
-      if (kind === 'video') {
-        if (muted) {
-          toast.warning('Screen share video paused');
-        } else {
-          toast.info('Screen share video resumed');
+      // Record screen share in database for students
+      if (isTeacher && classData) {
+        try {
+          await addDoc(collection(db, 'screenShares'), {
+            classId: classData.id,
+            teacherId: currentUser?.uid,
+            teacherName: currentUser?.displayName || currentUser?.email,
+            isActive: true,
+            startedAt: Timestamp.fromDate(new Date())
+          });
+        } catch (dbError) {
+          console.error('Error recording screen share:', dbError);
         }
       }
-    };
 
-    const handleScreenShareEnded = () => {
-      console.log('Screen share ended event received');
-      // Remove event listeners first
-      window.removeEventListener('screenshare-mute-change', handleMuteChange as EventListener);
-      window.removeEventListener('screenshare-ended', handleScreenShareEnded);
-      // Then stop screen share
-      handleStopScreenShare();
-    };
-
-    window.addEventListener('screenshare-mute-change', handleMuteChange as EventListener);
-    window.addEventListener('screenshare-ended', handleScreenShareEnded);
-
-    // Return cleanup function
-    return () => {
-      window.removeEventListener('screenshare-mute-change', handleMuteChange as EventListener);
-      window.removeEventListener('screenshare-ended', handleScreenShareEnded);
-    };
-    
-  } catch (error) {
-    console.error('Error starting screen share:', error);
-    if ((error as Error).name === 'NotAllowedError') {
-      toast.error('Screen sharing permission denied. Please allow screen sharing in your browser.');
-    } else if ((error as Error).name === 'NotFoundError') {
-      toast.error('No screen sharing sources found. Please check your system settings.');
-    } else if ((error as Error).name === 'NotSupportedError') {
-      toast.error('Screen sharing is not supported in this browser.');
-    } else {
-      toast.error('Failed to start screen sharing. Please try again.');
+      toast.success('Screen sharing started');
+      
+    } catch (error) {
+      console.error('Error starting screen share:', error);
+      toast.error('Failed to start screen sharing');
     }
-  }
-};
+  };
 
   const handleStopScreenShare = async () => {
     console.log('Stopping screen share...');
     screenShareInstance.current.stopScreenShare();
     setScreenStream(null);
     setIsScreenSharing(false);
-    setStreamInfo(null);
 
-    // Update screen share record in database
-    if (isTeacher && classData && activeScreenShare) {
-      try {
-        await updateDoc(doc(db, 'screenShares', activeScreenShare.id), {
-          isActive: false,
-          endedAt: Timestamp.fromDate(new Date())
-        });
-        console.log('Screen share stopped in database');
-        
-        setActiveScreenShare(null);
-        setIsScreenShareActive(false);
-      } catch (error) {
-        console.error('Error updating screen share record:', error);
-        setActiveScreenShare(null);
-        setIsScreenShareActive(false);
-      }
-    } else if (isTeacher && classData) {
+    if (isTeacher && classData) {
       try {
         const activeSharesQuery = query(
           collection(db, 'screenShares'),
@@ -1215,13 +820,9 @@ const handleStartScreenShare = async () => {
         );
         
         await Promise.all(updatePromises);
-        console.log('Cleaned up all active screen shares');
       } catch (error) {
         console.error('Error cleaning up screen shares:', error);
       }
-      
-      setActiveScreenShare(null);
-      setIsScreenShareActive(false);
     }
 
     toast.info('Screen sharing stopped');
@@ -1245,64 +846,62 @@ const handleStartScreenShare = async () => {
       };
 
       await addDoc(collection(db, 'quizzes'), quizData);
-      toast.success('Quiz created successfully! Students can now see it.');
+      toast.success('Quiz created successfully!');
       setShowQuizDialog(false);
       setNewQuiz({ question: '', option1: '', option2: '', option3: '', option4: '', correctAnswer: 0 });
     } catch (error: any) {
-      toast.error(error.message || 'Failed to create quiz');
+      toast.error('Failed to create quiz');
     }
   };
 
-  const handleSubmitQuizResponse = async () => {
-    if (selectedOption === null || !activeQuiz || !classData) return;
+const handleSubmitQuizResponse = async () => {
+  if (selectedOption === null || !activeQuiz || !classData || hasSubmitted) return;
 
-    try {
-      const responseData = {
-        quizId: activeQuiz.id,
-        classId: classData.id,
-        studentId: currentUser!.uid,
-        studentName: currentUser!.displayName || currentUser!.email || 'Student',
-        selectedOption,
-        isCorrect: selectedOption === activeQuiz.correctAnswer,
-        submittedAt: Timestamp.fromDate(new Date()),
-        question: activeQuiz.question,
-        correctOption: activeQuiz.options[activeQuiz.correctAnswer],
-        quizTitle: activeQuiz.question.substring(0, 50) + (activeQuiz.question.length > 50 ? '...' : ''),
-        score: selectedOption === activeQuiz.correctAnswer ? 1 : 0,
-        totalQuestions: 1
-      };
+  try {
+    const responseData = {
+      quizId: activeQuiz.id,
+      classId: classData.id,
+      studentId: currentUser!.uid,
+      studentName: currentUser!.displayName || currentUser!.email || 'Student',
+      selectedOption,
+      isCorrect: selectedOption === activeQuiz.correctAnswer,
+      submittedAt: Timestamp.fromDate(new Date()),
+      question: activeQuiz.question,
+      correctOption: activeQuiz.options[activeQuiz.correctAnswer],
+      studentAnswer: activeQuiz.options[selectedOption]
+    };
 
-      await addDoc(collection(db, 'quizResponses'), responseData);
-      toast.success('Answer submitted!');
-      setHasSubmitted(true);
-      setTimeout(() => {
-        setShowQuizResponseDialog(false);
-        setDismissedQuizzes(prev => new Set(prev).add(activeQuiz.id));
-      }, 2000);
-    } catch (error: any) {
-      toast.error(error.message || 'Failed to submit answer');
-    }
-  };
+    await addDoc(collection(db, 'quizResponses'), responseData);
+    toast.success('Answer submitted!');
+    setHasSubmitted(true);
+    
+    // Don't automatically close the dialog - let student review
+  } catch (error: any) {
+    toast.error('Failed to submit answer');
+  }
+};
 
-  const handleQuizDialogClose = () => {
-    if (activeQuiz && !isTeacher) {
-      setDismissedQuizzes(prev => new Set(prev).add(activeQuiz.id));
-    }
-    setShowQuizResponseDialog(false);
+const handleQuizDialogClose = () => {
+  if (activeQuiz && !isTeacher && hasSubmitted) {
+    setDismissedQuizzes(prev => new Set(prev).add(activeQuiz.id));
+  }
+  setShowQuizResponseDialog(false);
+  // Don't reset selected option if already submitted
+  if (!hasSubmitted) {
     setSelectedOption(null);
-    setHasSubmitted(false);
-  };
+  }
+};
 
-  const handleReopenQuiz = () => {
-    if (activeQuiz) {
-      setShowQuizResponseDialog(true);
-      setDismissedQuizzes(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(activeQuiz.id);
-        return newSet;
-      });
-    }
-  };
+const handleReopenQuiz = () => {
+  if (activeQuiz) {
+    setShowQuizResponseDialog(true);
+    setDismissedQuizzes(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(activeQuiz.id);
+      return newSet;
+    });
+  }
+};
 
   const handleCloseQuiz = async () => {
     if (!activeQuiz) return;
@@ -1311,7 +910,6 @@ const handleStartScreenShare = async () => {
       await updateDoc(doc(db, 'quizzes', activeQuiz.id), { isActive: false });
       toast.success('Quiz closed');
       setShowResultsDialog(true);
-      setDismissedQuizzes(new Set());
     } catch (error: any) {
       toast.error('Failed to close quiz');
     }
@@ -1327,26 +925,13 @@ const handleStartScreenShare = async () => {
       });
       
       // Stop all media streams
-      webRTCManager.stopLocalStream();
-      webRTCManager.closeAllConnections();
+      webRTCManager.current.stopLocalStream();
+      webRTCManager.current.closeAllConnections();
       
       if (screenStream) {
         screenStream.getTracks().forEach(track => track.stop());
       }
       screenShareInstance.current.stopScreenShare();
-      
-      // End any active screen shares
-      if (activeScreenShare) {
-        await updateDoc(doc(db, 'screenShares', activeScreenShare.id), {
-          isActive: false,
-          endedAt: Timestamp.fromDate(new Date())
-        });
-      }
-      
-      // End any active quizzes
-      if (activeQuiz) {
-        await updateDoc(doc(db, 'quizzes', activeQuiz.id), { isActive: false });
-      }
       
       toast.success('Class ended successfully');
       navigate(isTeacher ? '/teacher' : '/student');
@@ -1363,44 +948,35 @@ const handleStartScreenShare = async () => {
   const retryMedia = () => {
     initializeMedia(audioEnabled, videoEnabled);
   };
-  // Monitor and display connection status
-useEffect(() => {
-  if (isTeacher) {
-    const interval = setInterval(() => {
-      const activeConnectionsList = webRTCManager.getActiveConnections();
-      console.log(`Teacher: ${activeConnectionsList.length} active connections`);
-      
-      activeConnectionsList.forEach(studentId => {
-        const connectionState = webRTCManager.getConnectionState(studentId);
-        const signalingState = webRTCManager.getSignalingState(studentId);
-        console.log(`Student ${studentId}: ${connectionState} (signaling: ${signalingState})`);
-      });
-    }, 10000);
 
-    return () => clearInterval(interval);
-  }
-}, [isTeacher]);
-
-  // Initialize media for teachers on component mount
+  // Cleanup on unmount
   useEffect(() => {
-    if (isTeacher) {
-      initializeMedia(true, true);
-    }
-  }, [isTeacher]);
+    return () => {
+      console.log('Cleaning up classroom resources');
+      webRTCManager.current.stopLocalStream();
+      webRTCManager.current.closeAllConnections();
+      screenShareInstance.current.stopScreenShare();
+    };
+  }, []);
 
-// Cleanup media streams on unmount
-useEffect(() => {
-  return () => {
-    console.log('Cleaning up classroom resources');
-    webRTCManager.stopLocalStream();
-    webRTCManager.closeAllConnections();
-    
-    if (screenStream) {
-      screenStream.getTracks().forEach(track => track.stop());
-    }
-    screenShareInstance.current.stopScreenShare();
-  };
-}, [screenStream]);
+  // Monitor screen shares for students
+  useEffect(() => {
+    if (!classData?.id || isTeacher) return;
+
+    const screenSharesQuery = query(
+      collection(db, 'screenShares'),
+      where('classId', '==', classData.id),
+      where('isActive', '==', true),
+      orderBy('startedAt', 'desc'),
+      limit(1)
+    );
+
+    const unsubscribeScreenShares = onSnapshot(screenSharesQuery, (snapshot) => {
+      setIsScreenShareActive(!snapshot.empty);
+    });
+
+    return () => unsubscribeScreenShares();
+  }, [classData?.id, isTeacher]);
 
   const correctCount = quizResponses.filter(r => r.isCorrect).length;
   const totalResponses = quizResponses.length;
@@ -1449,7 +1025,7 @@ useEffect(() => {
                 with {classData.teacherName} • {classData.status?.toUpperCase()}
                 {isScreenShareActive && !isTeacher && ' • SCREEN SHARING'}
                 {activeQuiz && !isTeacher && ' • QUIZ ACTIVE'}
-                {isTeacher && ` • ${activeConnections.size}/${students.length} CONNECTED`}
+                {isTeacher && ` • ${activeConnections.size} CONNECTED`}
               </p>
             </div>
           </div>
@@ -1505,16 +1081,6 @@ useEffect(() => {
         </div>
       </header>
 
-      {/* Debug Info */}
-      {process.env.NODE_ENV === 'development' && (
-        <div className="bg-blue-900 text-blue-100 p-2 text-xs">
-          <strong>Debug:</strong> Class: {classData.title} | Status: {classData.status} | 
-          Teacher: {isTeacher ? 'Yes' : 'No'} | Screen Share Active: {isScreenShareActive ? 'Yes' : 'No'} |
-          Students: {students.length} | Active Quiz: {activeQuiz ? 'Yes' : 'No'} |
-          WebRTC Connected: {activeConnections.size} | Remote Streams: {remoteStreams.size}
-        </div>
-      )}
-
       {/* Main Content */}
       <div className="flex-1 flex">
         {/* Video/Screen Share Area */}
@@ -1543,11 +1109,6 @@ useEffect(() => {
                   Sharing your screen with {students.length} students
                 </div>
               </div>
-              {streamInfo && (
-                <div className="mt-2 text-xs text-gray-400">
-                  Stream: {streamInfo.hasVideo ? 'Video ✓' : 'Video ✗'} | {streamInfo.hasAudio ? 'Audio ✓' : 'Audio ✗'}
-                </div>
-              )}
             </div>
           ) : isScreenShareActive && !isTeacher ? (
             <div className="h-full flex flex-col">
@@ -1574,52 +1135,8 @@ useEffect(() => {
                       <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
                       Live Screen Sharing Active
                     </div>
-                    
-                    <div className="mt-6 p-4 bg-gray-800 rounded-lg max-w-md mx-auto">
-                      <h4 className="font-semibold mb-2">You're seeing:</h4>
-                      <ul className="text-sm text-gray-300 text-left space-y-1">
-                        <li>• Teacher's live screen</li>
-                        <li>• Presentations and documents</li>
-                        <li>• Real-time demonstrations</li>
-                        <li>• Code and applications</li>
-                      </ul>
-                    </div>
                   </div>
                 </div>
-                
-                <div className="absolute bottom-4 left-4 bg-black bg-opacity-70 text-white p-2 rounded text-sm">
-                  Watching {classData.teacherName}'s screen • Live
-                </div>
-                <div className="absolute top-4 right-4 bg-red-500 text-white px-2 py-1 rounded text-xs font-bold animate-pulse">
-                  LIVE
-                </div>
-              </div>
-              <div className="mt-2 text-xs text-green-400 flex items-center gap-2">
-                <ScreenShare className="w-3 h-3" />
-                Screen sharing active • You're seeing the teacher's screen in real-time
-              </div>
-              
-              <div className="mt-4 flex gap-2">
-                <Button 
-                  variant="outline" 
-                  size="sm"
-                  onClick={() => toast.info('Screen sharing controls are managed by the teacher')}
-                  className="text-xs"
-                >
-                  <Eye className="w-3 h-3 mr-1" />
-                  View Full Screen
-                </Button>
-                {activeQuiz && (
-                  <Button 
-                    variant="outline" 
-                    size="sm"
-                    onClick={dismissedQuizzes.has(activeQuiz.id) ? handleReopenQuiz : () => setShowQuizResponseDialog(true)}
-                    className="text-xs bg-yellow-500/20 text-yellow-400 border-yellow-500/30"
-                  >
-                    <Award className="w-3 h-3 mr-1" />
-                    Answer Quiz
-                  </Button>
-                )}
               </div>
             </div>
           ) : isTeacher ? (
@@ -1719,14 +1236,6 @@ useEffect(() => {
                                   {student?.studentName || 'Student'}
                                 </div>
                               </div>
-                              <div className="absolute top-2 right-2">
-                                <Badge 
-                                  variant={isConnected ? "default" : "secondary"} 
-                                  className={`text-xs ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}
-                                >
-                                  {isConnected ? 'Live' : 'Offline'}
-                                </Badge>
-                              </div>
                             </div>
                           );
                         })}
@@ -1741,8 +1250,7 @@ useEffect(() => {
                 <ScreenShare className="w-24 h-24 text-gray-500 mb-4" />
                 <h2 className="text-2xl font-semibold mb-2">Ready to present?</h2>
                 <p className="text-gray-400 text-center mb-6 max-w-md">
-                  Start screen sharing to show your presentation, documents, or anything on your screen to all students.
-                  They will see your actual screen in real-time.
+                  Start screen sharing to show your presentation to all students.
                 </p>
                 <Button 
                   onClick={handleStartScreenShare} 
@@ -1752,9 +1260,6 @@ useEffect(() => {
                   <ScreenShare className="w-5 h-5 mr-2" />
                   Share Screen
                 </Button>
-                <p className="text-sm text-gray-500 mt-4">
-                  Students will see your actual screen when you start sharing
-                </p>
               </div>
             </div>
           ) : (
@@ -1791,11 +1296,6 @@ useEffect(() => {
                             <div className="absolute bottom-2 left-2 bg-black bg-opacity-70 text-white px-2 py-1 rounded text-xs">
                               {classData.teacherName} (Teacher)
                             </div>
-                            <div className="absolute top-2 right-2">
-                              <Badge variant="default" className="bg-green-500 text-white text-xs">
-                                Live
-                              </Badge>
-                            </div>
                           </div>
                         ))}
                       </div>
@@ -1807,21 +1307,11 @@ useEffect(() => {
                   <User className="w-16 h-16 text-gray-500 mx-auto mb-4" />
                   <h3 className="text-lg font-semibold mb-2">Waiting for teacher</h3>
                   <p className="text-gray-400">The teacher's video will appear here when they start streaming</p>
-                  {!webRTCManager.isStreamInitialized() && (
-                    <Button 
-                      onClick={() => initializeMedia(true, true)} 
-                      className="mt-4"
-                      variant="outline"
-                    >
-                      <Video className="w-4 h-4 mr-2" />
-                      Enable My Camera
-                    </Button>
-                  )}
                 </div>
               )}
 
               {/* Student's Own Video (if enabled) */}
-              {webRTCManager.isStreamInitialized() && (
+              {isWebRTCInitialized && (
                 <div className="mb-4">
                   <Card className="bg-gray-800 border-gray-700">
                     <CardHeader className="pb-3">
@@ -1872,28 +1362,8 @@ useEffect(() => {
                   <Monitor className="w-24 h-24 text-gray-500 mb-4" />
                   <h2 className="text-2xl font-semibold mb-2">Waiting for presenter</h2>
                   <p className="text-gray-400 text-center max-w-md">
-                    The teacher will start sharing their screen shortly. You'll see the presentation here in real-time.
+                    The teacher will start sharing their screen shortly.
                   </p>
-                  {classData.teacherName && (
-                    <p className="text-blue-400 mt-4">
-                      Teacher: {classData.teacherName}
-                    </p>
-                  )}
-                  <div className="mt-6 p-4 bg-gray-700 rounded-lg">
-                    <p className="text-sm text-gray-300">
-                      <strong>Students online:</strong> {students.length}
-                    </p>
-                    {activeQuiz && (
-                      <p className="text-sm text-yellow-300 mt-2">
-                        <strong>Active Quiz:</strong> There's a quiz available to answer
-                      </p>
-                    )}
-                    {remoteStreams.size > 0 && (
-                      <p className="text-sm text-green-300 mt-2">
-                        <strong>Video:</strong> Connected to teacher's camera
-                      </p>
-                    )}
-                  </div>
                 </div>
               )}
             </div>
@@ -1961,7 +1431,6 @@ useEffect(() => {
                             </div>
                             <p className="text-xs text-gray-400">
                               Joined {student.joinedAt ? new Date(student.joinedAt).toLocaleTimeString() : 'recently'}
-                              {!isConnected && student.studentId !== classData?.teacherId && ' • Offline'}
                             </p>
                           </div>
                         </div>
@@ -2041,7 +1510,7 @@ useEffect(() => {
                         size="sm"
                         onClick={toggleVideo}
                         className="flex-1"
-                        disabled={!webRTCManager.isStreamInitialized()}
+                        disabled={!isWebRTCInitialized}
                       >
                         {videoEnabled ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
                       </Button>
@@ -2050,38 +1519,11 @@ useEffect(() => {
                         size="sm"
                         onClick={toggleAudio}
                         className="flex-1"
-                        disabled={!webRTCManager.isStreamInitialized()}
+                        disabled={!isWebRTCInitialized}
                       >
                         {audioEnabled ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
                       </Button>
                     </div>
-                    
-                    {/* Show media status */}
-                    {!webRTCManager.isStreamInitialized() && (
-                      <div className="text-center">
-                        <Button 
-                          onClick={() => initializeMedia(true, false)} 
-                          size="sm" 
-                          variant="outline"
-                          className="w-full mb-2"
-                        >
-                          <Mic className="w-4 h-4 mr-2" />
-                          Enable Microphone
-                        </Button>
-                        <Button 
-                          onClick={() => initializeMedia(false, true)} 
-                          size="sm" 
-                          variant="outline"
-                          className="w-full"
-                        >
-                          <Video className="w-4 h-4 mr-2" />
-                          Enable Camera
-                        </Button>
-                        <p className="text-xs text-gray-400 mt-2">
-                          Enable at least one to participate with audio/video
-                        </p>
-                      </div>
-                    )}
                     
                     {mediaError && (
                       <div className="text-xs text-red-400 bg-red-400/10 p-2 rounded">
@@ -2097,11 +1539,11 @@ useEffect(() => {
                   <CardHeader className="pb-3">
                     <CardTitle className="text-sm flex items-center gap-2">
                       <Award className="w-4 h-4 text-yellow-400" />
-                      Quiz Available
+                      {hasSubmitted ? 'Quiz Completed' : 'Quiz Available'}
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2">
-                    {!dismissedQuizzes.has(activeQuiz.id) ? (
+                    {!hasSubmitted && !dismissedQuizzes.has(activeQuiz.id) ? (
                       <Button 
                         onClick={() => setShowQuizResponseDialog(true)}
                         variant="outline" 
@@ -2112,19 +1554,24 @@ useEffect(() => {
                         Answer Quiz Question
                       </Button>
                     ) : (
-                      <Button 
-                        onClick={handleReopenQuiz}
-                        variant="outline" 
-                        size="sm" 
-                        className="w-full justify-start"
-                      >
-                        <Eye className="w-4 h-4 mr-2" />
-                        View Quiz Again
-                      </Button>
+                      <>
+                        <Button 
+                          onClick={handleReopenQuiz}
+                          variant="outline" 
+                          size="sm" 
+                          className="w-full justify-start"
+                        >
+                          <Eye className="w-4 h-4 mr-2" />
+                          View Quiz Result
+                        </Button>
+                        <div className="text-xs text-gray-400 text-center">
+                          {hasSubmitted 
+                            ? 'You have submitted your answer' 
+                            : 'Quiz completed'
+                          }
+                        </div>
+                      </>
                     )}
-                    <div className="text-xs text-gray-400 mt-2">
-                      {totalResponses} students have responded
-                    </div>
                   </CardContent>
                 </Card>
               )}
@@ -2152,14 +1599,6 @@ useEffect(() => {
                       </div>
                     </div>
                   )}
-                  {activeQuiz && (
-                    <div className="mt-3 pt-3 border-t border-gray-600">
-                      <div className="flex justify-between text-xs">
-                        <span className="text-gray-400">Active Quiz:</span>
-                        <span className="text-yellow-400">{totalResponses} responses</span>
-                      </div>
-                    </div>
-                  )}
                 </CardContent>
               </Card>
             </TabsContent>
@@ -2169,18 +1608,6 @@ useEffect(() => {
                 <div className="text-center text-gray-500 py-8">
                   <MessageSquare className="w-12 h-12 mx-auto mb-2" />
                   <p>Chat feature coming soon</p>
-                </div>
-              </div>
-              <div className="p-4 border-t border-gray-700">
-                <div className="flex gap-2">
-                  <Input 
-                    placeholder="Type a message..." 
-                    className="bg-gray-700 border-gray-600"
-                    disabled
-                  />
-                  <Button disabled>
-                    <Send className="w-4 h-4" />
-                  </Button>
                 </div>
               </div>
             </TabsContent>
@@ -2203,76 +1630,12 @@ useEffect(() => {
                           <span>{totalResponses} responses</span>
                           <span>{accuracy}% accuracy</span>
                         </div>
-                        {!isTeacher && (
-                          <Button 
-                            onClick={dismissedQuizzes.has(activeQuiz.id) ? handleReopenQuiz : () => setShowQuizResponseDialog(true)}
-                            size="sm" 
-                            className="w-full mt-2 bg-yellow-500 hover:bg-yellow-600"
-                          >
-                            {dismissedQuizzes.has(activeQuiz.id) ? 'View Quiz Again' : 'Answer Quiz'}
-                          </Button>
-                        )}
                       </div>
                     </div>
                   ) : (
                     <div className="text-center py-4 text-gray-500">
                       <Award className="w-8 h-8 mx-auto mb-2" />
                       <p className="text-sm">No active activities</p>
-                    </div>
-                  )}
-
-                  {isTeacher && quizResponses.length > 0 && (
-                    <div className="mt-4">
-                      <h4 className="text-xs font-medium text-gray-400 mb-2">Recent Responses</h4>
-                      <div className="space-y-2">
-                        {quizResponses.slice(-3).map((response) => (
-                          <div key={response.id} className="flex items-center gap-2 text-xs p-2 bg-gray-600 rounded">
-                            <Avatar className="h-6 w-6">
-                              <AvatarFallback className="text-xs bg-purple-600">
-                                {response.studentName?.[0]?.toUpperCase() || 'S'}
-                              </AvatarFallback>
-                            </Avatar>
-                            <div className="flex-1">
-                              <p className="truncate">{response.studentName}</p>
-                            </div>
-                            {response.isCorrect ? (
-                              <CheckCircle2 className="w-4 h-4 text-green-400" />
-                            ) : (
-                              <XCircle className="w-4 h-4 text-red-400" />
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {isTeacher && activeConnections.size > 0 && (
-                    <div className="mt-4">
-                      <h4 className="text-xs font-medium text-gray-400 mb-2">Connected Students</h4>
-                      <div className="space-y-2">
-                        {Array.from(activeConnections).slice(0, 3).map(studentId => {
-                          const student = students.find(s => s.studentId === studentId);
-                          return (
-                            <div key={studentId} className="flex items-center gap-2 text-xs p-2 bg-gray-600 rounded">
-                              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                              <Avatar className="h-6 w-6">
-                                <AvatarFallback className="text-xs bg-green-600">
-                                  {student?.studentName?.[0]?.toUpperCase() || 'S'}
-                                </AvatarFallback>
-                              </Avatar>
-                              <div className="flex-1">
-                                <p className="truncate">{student?.studentName || 'Student'}</p>
-                              </div>
-                              <Wifi className="w-3 h-3 text-green-400" />
-                            </div>
-                          );
-                        })}
-                        {activeConnections.size > 3 && (
-                          <div className="text-center text-xs text-gray-400">
-                            +{activeConnections.size - 3} more connected
-                          </div>
-                        )}
-                      </div>
                     </div>
                   )}
                 </CardContent>
@@ -2284,8 +1647,8 @@ useEffect(() => {
 
       {/* Quiz Creation Dialog */}
       <Dialog open={showQuizDialog} onOpenChange={setShowQuizDialog}>
-        <DialogContent className="bg-gray-800 border-gray-700 text-white max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
-          <DialogHeader className="flex-shrink-0">
+        <DialogContent className="bg-gray-800 border-gray-700 text-white max-w-2xl">
+          <DialogHeader>
             <DialogTitle className="text-xl flex items-center gap-2">
               <Award className="w-6 h-6 text-yellow-400" />
               Create Quiz
@@ -2295,139 +1658,104 @@ useEffect(() => {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex-1 overflow-y-auto pr-2 -mr-2 custom-scrollbar">
-            <form onSubmit={handleCreateQuiz} className="space-y-6 pb-4">
-              <div className="space-y-3">
-                <Label htmlFor="question" className="text-sm font-medium text-gray-300 flex items-center gap-2">
-                  <span>Question</span>
-                  <span className="text-red-400">*</span>
-                </Label>
-                <Textarea
-                  id="question"
-                  value={newQuiz.question}
-                  onChange={(e) => setNewQuiz({...newQuiz, question: e.target.value})}
-                  placeholder="Enter your quiz question here..."
-                  className="bg-gray-700 border-gray-600 text-white min-h-[100px] resize-none"
-                  required
-                />
-              </div>
+          <form onSubmit={handleCreateQuiz} className="space-y-6">
+            <div className="space-y-3">
+              <Label htmlFor="question" className="text-sm font-medium text-gray-300">
+                Question *
+              </Label>
+              <Textarea
+                id="question"
+                value={newQuiz.question}
+                onChange={(e) => setNewQuiz({...newQuiz, question: e.target.value})}
+                placeholder="Enter your quiz question here..."
+                className="bg-gray-700 border-gray-600 text-white min-h-[100px]"
+                required
+              />
+            </div>
 
-              <div className="space-y-4">
-                <Label className="text-sm font-medium text-gray-300">
-                  Quiz Options
-                </Label>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {[1, 2, 3, 4].map((num) => (
-                    <div key={num} className="space-y-2">
-                      <Label htmlFor={`option${num}`} className="text-sm font-medium text-gray-300 flex items-center gap-2">
-                        <span>Option {num}</span>
-                        <span className="text-red-400">*</span>
-                      </Label>
-                      <Input
-                        id={`option${num}`}
-                        value={newQuiz[`option${num}` as keyof typeof newQuiz] as string}
-                        onChange={(e) => setNewQuiz({...newQuiz, [`option${num}`]: e.target.value})}
-                        placeholder={`Enter option ${num}`}
-                        className="bg-gray-700 border-gray-600 text-white"
-                        required
-                      />
-                    </div>
-                  ))}
-                </div>
+            <div className="space-y-4">
+              <Label className="text-sm font-medium text-gray-300">
+                Quiz Options *
+              </Label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {[1, 2, 3, 4].map((num) => (
+                  <div key={num} className="space-y-2">
+                    <Label htmlFor={`option${num}`} className="text-sm font-medium text-gray-300">
+                      Option {num} *
+                    </Label>
+                    <Input
+                      id={`option${num}`}
+                      value={newQuiz[`option${num}` as keyof typeof newQuiz] as string}
+                      onChange={(e) => setNewQuiz({...newQuiz, [`option${num}`]: e.target.value})}
+                      placeholder={`Enter option ${num}`}
+                      className="bg-gray-700 border-gray-600 text-white"
+                      required
+                    />
+                  </div>
+                ))}
               </div>
-                
-              <div className="space-y-4">
-                <Label className="text-sm font-medium text-gray-300 flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-green-400" />
-                  <span>Correct Answer</span>
-                  <span className="text-red-400">*</span>
-                </Label>
-                
-                <RadioGroup 
-                  value={newQuiz.correctAnswer.toString()} 
-                  onValueChange={(value) => setNewQuiz({...newQuiz, correctAnswer: parseInt(value)})}
-                  className="grid grid-cols-2 gap-3"
-                >
-                  {[1, 2, 3, 4].map((num) => (
-                    <div 
-                      key={num} 
+            </div>
+              
+            <div className="space-y-4">
+              <Label className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-green-400" />
+                Correct Answer *
+              </Label>
+              
+              <RadioGroup 
+                value={newQuiz.correctAnswer.toString()} 
+                onValueChange={(value) => setNewQuiz({...newQuiz, correctAnswer: parseInt(value)})}
+                className="grid grid-cols-2 gap-3"
+              >
+                {[1, 2, 3, 4].map((num) => (
+                  <div 
+                    key={num} 
+                    className={`
+                      relative flex items-center space-x-3 p-4 rounded-xl border-2 transition-all duration-200 cursor-pointer
+                      ${newQuiz.correctAnswer === num - 1 
+                        ? 'bg-green-500/20 border-green-500' 
+                        : 'bg-gray-700/80 border-gray-600 hover:bg-gray-600/80'
+                      }
+                    `}
+                  >
+                    <RadioGroupItem 
+                      value={(num - 1).toString()} 
+                      id={`correct${num}`}
+                      className="sr-only"
+                    />
+                    <Label 
+                      htmlFor={`correct${num}`} 
                       className={`
-                        relative flex items-center space-x-3 p-4 rounded-xl border-2 transition-all duration-200 cursor-pointer
-                        ${newQuiz.correctAnswer === num - 1 
-                          ? 'bg-green-500/20 border-green-500 shadow-lg shadow-green-500/20 scale-[1.02]' 
-                          : 'bg-gray-700/80 border-gray-600 hover:bg-gray-600/80 hover:border-gray-500 hover:scale-[1.01]'
-                        }
+                        flex-1 text-sm font-medium cursor-pointer select-none
+                        ${newQuiz.correctAnswer === num - 1 ? 'text-green-300' : 'text-gray-300'}
                       `}
                     >
-                      <RadioGroupItem 
-                        value={(num - 1).toString()} 
-                        id={`correct${num}`}
-                        className={`
-                          w-5 h-5 border-2
-                          ${newQuiz.correctAnswer === num - 1 
-                            ? 'border-green-500 text-green-500 bg-green-500/20' 
-                            : 'border-gray-400 text-gray-400 hover:border-green-400'
-                          }
-                        `}
-                      />
-                      <Label 
-                        htmlFor={`correct${num}`} 
-                        className={`
-                          flex-1 text-sm font-medium cursor-pointer select-none
-                          ${newQuiz.correctAnswer === num - 1 ? 'text-green-300' : 'text-gray-300'}
-                        `}
-                      >
-                        Option {num}
-                      </Label>
-                        
-                      {newQuiz.correctAnswer === num - 1 && (
-                        <div className="flex-shrink-0">
-                          <div className="flex items-center gap-1 text-green-500">
-                            <CheckCircle2 className="w-4 h-4" />
-                            <span className="text-xs font-medium">Correct</span>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </RadioGroup>
-                
-                {newQuiz.correctAnswer !== null && newQuiz[`option${newQuiz.correctAnswer + 1}` as keyof typeof newQuiz] && (
-                  <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
-                    <div className="flex items-center gap-2 text-green-400">
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span className="text-sm font-medium">Correct Answer Preview:</span>
-                    </div>
-                    <p className="text-sm text-green-300 mt-1 ml-6">
-                      "{newQuiz[`option${newQuiz.correctAnswer + 1}` as keyof typeof newQuiz]}"
-                    </p>
+                      Option {num}
+                    </Label>
                   </div>
-                )}
-              </div>
-            </form>
-          </div>
-              
-          <div className="flex-shrink-0 border-t border-gray-700 pt-4 mt-2">
-            <div className="flex gap-3">
+                ))}
+              </RadioGroup>
+            </div>
+
+            <div className="flex gap-3 pt-2">
               <Button 
                 type="button" 
                 variant="outline" 
                 onClick={() => setShowQuizDialog(false)}
-                className="flex-1 border-gray-600 text-gray-300 hover:bg-gray-700 hover:text-white"
+                className="flex-1 border-gray-600 text-gray-300 hover:bg-gray-700"
               >
                 Cancel
               </Button>
               <Button 
                 type="submit" 
-                onClick={handleCreateQuiz}
-                className="flex-1 bg-green-600 hover:bg-green-700 shadow-lg hover:shadow-green-500/25"
+                className="flex-1 bg-green-600 hover:bg-green-700"
                 disabled={!newQuiz.question || !newQuiz.option1 || !newQuiz.option2 || !newQuiz.option3 || !newQuiz.option4}
               >
                 <Award className="w-4 h-4 mr-2" />
                 Create Quiz
               </Button>
             </div>
-          </div>
+          </form>
         </DialogContent>
       </Dialog>
 
@@ -2440,10 +1768,13 @@ useEffect(() => {
               {hasSubmitted ? 'Quiz Review' : 'Quick Quiz'}
             </DialogTitle>
             <DialogDescription className="text-gray-400">
-              {hasSubmitted ? 'Review your answer and the correct solution' : 'Answer the question below'}
+              {hasSubmitted 
+                ? 'Review your submitted answer' 
+                : 'Answer the question below - You can only submit once'
+              }
             </DialogDescription>
           </DialogHeader>
-
+            
           {activeQuiz && (
             <div className="space-y-4">
               <div className="bg-gray-700 p-4 rounded-lg border border-gray-600">
@@ -2456,7 +1787,8 @@ useEffect(() => {
                   const isCorrectAnswer = index === activeQuiz.correctAnswer;
                   const isStudentCorrect = hasSubmitted && isStudentAnswer && isCorrectAnswer;
                   const isStudentWrong = hasSubmitted && isStudentAnswer && !isCorrectAnswer;
-
+                  const showCorrectAnswer = hasSubmitted && isCorrectAnswer && !isStudentCorrect;
+                
                   return (
                     <div 
                       key={index} 
@@ -2467,22 +1799,28 @@ useEffect(() => {
                             ? 'bg-green-500/20 border-green-500/80 shadow-lg shadow-green-500/20' 
                             : isStudentWrong
                               ? 'bg-red-500/20 border-red-500/80 shadow-lg shadow-red-500/20'
-                              : 'bg-gray-700/50 border-gray-600/50'
+                              : showCorrectAnswer
+                                ? 'bg-green-500/10 border-green-500/40'
+                                : 'bg-gray-700/50 border-gray-600/50'
                           : 'bg-gray-700/80 border-gray-600 hover:bg-gray-600/80 hover:border-gray-500'
                         }
-                        ${!hasSubmitted && 'cursor-pointer'}
+                        ${!hasSubmitted && !dismissedQuizzes.has(activeQuiz.id) && 'cursor-pointer'}
                       `}
-                      onClick={() => !hasSubmitted && setSelectedOption(index)}
+                      onClick={() => !hasSubmitted && !dismissedQuizzes.has(activeQuiz.id) && setSelectedOption(index)}
                     >
                       <div className="flex items-center h-5 mt-0.5">
                         {hasSubmitted ? (
-                          isCorrectAnswer ? (
-                            <CheckCircle2 className="w-5 h-5 text-green-500" />
-                          ) : isStudentWrong ? (
-                            <XCircle className="w-5 h-5 text-red-500" />
-                          ) : (
-                            <div className="w-5 h-5 border-2 border-gray-500 rounded-full" />
-                          )
+                          <>
+                            {isCorrectAnswer && (
+                              <CheckCircle2 className="w-5 h-5 text-green-500" />
+                            )}
+                            {isStudentWrong && (
+                              <XCircle className="w-5 h-5 text-red-500" />
+                            )}
+                            {!isCorrectAnswer && !isStudentWrong && (
+                              <div className="w-5 h-5 border-2 border-gray-500 rounded-full" />
+                            )}
+                          </>
                         ) : (
                           <div className={`
                             w-5 h-5 border-2 rounded-full flex items-center justify-center
@@ -2490,6 +1828,7 @@ useEffect(() => {
                               ? 'border-blue-500 bg-blue-500/20' 
                               : 'border-gray-400'
                             }
+                            ${dismissedQuizzes.has(activeQuiz.id) ? 'opacity-50 cursor-not-allowed' : ''}
                           `}>
                             {selectedOption === index && (
                               <div className="w-2 h-2 bg-blue-500 rounded-full" />
@@ -2506,36 +1845,29 @@ useEffect(() => {
                               ? 'text-green-400' 
                               : isStudentWrong
                                 ? 'text-red-400'
-                                : 'text-gray-400'
+                                : showCorrectAnswer
+                                  ? 'text-green-300'
+                                  : 'text-gray-400'
                             : selectedOption === index 
                               ? 'text-blue-300'
                               : 'text-gray-300'
                           }
+                          ${dismissedQuizzes.has(activeQuiz.id) && !hasSubmitted ? 'opacity-50' : ''}
                         `}>
                           {option}
                         </div>
-                      </div>
                         
-                      {hasSubmitted && (
-                        <div className="flex-shrink-0 ml-2">
-                          {isCorrectAnswer && (
-                            <div className="flex items-center gap-1 text-green-500">
-                              <span className="text-sm font-medium">Correct Answer</span>
-                            </div>
-                          )}
-                          {isStudentWrong && (
-                            <div className="flex items-center gap-1 text-red-500">
-                              <span className="text-sm font-medium">Your Answer</span>
-                            </div>
-                          )}
-                          {isStudentCorrect && (
-                            <div className="flex items-center gap-1 text-green-500">
-                              <CheckCircle2 className="w-4 h-4" />
-                              <span className="text-sm font-medium">Your Answer ✓</span>
-                            </div>
-                          )}
-                        </div>
-                      )}
+                        {hasSubmitted && (
+                          <div className="mt-1 text-xs">
+                            {isStudentAnswer && (
+                              <span className="text-blue-400">Your answer</span>
+                            )}
+                            {showCorrectAnswer && (
+                              <span className="text-green-400">Correct answer</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -2584,17 +1916,17 @@ useEffect(() => {
                     </Button>
                     <Button 
                       onClick={handleSubmitQuizResponse}
-                      disabled={selectedOption === null}
+                      disabled={selectedOption === null || dismissedQuizzes.has(activeQuiz.id)}
                       className={`
                         flex-1 transition-all duration-200
-                        ${selectedOption === null 
+                        ${selectedOption === null || dismissedQuizzes.has(activeQuiz.id)
                           ? 'bg-gray-600 text-gray-400 cursor-not-allowed' 
                           : 'bg-blue-600 hover:bg-blue-700 shadow-lg hover:shadow-blue-500/25'
                         }
                       `}
                     >
                       <CheckCircle2 className="w-4 h-4 mr-2" />
-                      Submit Answer
+                      {dismissedQuizzes.has(activeQuiz.id) ? 'Already Submitted' : 'Submit Answer'}
                     </Button>
                   </>
                 ) : (
@@ -2629,62 +1961,33 @@ useEffect(() => {
 
       {/* Quiz Results Dialog */}
       <Dialog open={showResultsDialog} onOpenChange={setShowResultsDialog}>
-        <DialogContent className="bg-gray-800 border-gray-700 text-white max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
-          <DialogHeader className="flex-shrink-0">
+        <DialogContent className="bg-gray-800 border-gray-700 text-white max-w-2xl">
+          <DialogHeader>
             <DialogTitle>Quiz Results</DialogTitle>
             <DialogDescription className="text-gray-400">
               Results for: {activeQuiz?.question}
-              {quizResponses.length > 0 && (
-                <span className="ml-2 text-green-400">
-                  • {quizResponses.length} total responses
-                </span>
-              )}
             </DialogDescription>
           </DialogHeader>
             
           {activeQuiz && (
-            <div className="flex-1 overflow-y-auto space-y-6 pr-2 -mr-2">
-              {process.env.NODE_ENV === 'development' && (
-                <div className="bg-blue-900/20 p-3 rounded-lg border border-blue-700">
-                  <p className="text-sm text-blue-300">
-                    <strong>Debug:</strong> Quiz ID: {activeQuiz.id} | 
-                    Responses: {quizResponses.length} | 
-                    Students in class: {students.length}
-                  </p>
-                </div>
-              )}
-      
+            <div className="space-y-6">
               <div className="grid grid-cols-3 gap-4">
                 <div className="bg-gray-700 p-4 rounded-lg text-center">
                   <p className="text-2xl font-bold text-blue-400">{totalResponses}</p>
                   <p className="text-sm text-gray-400">Total Responses</p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {students.length} students in class
-                  </p>
                 </div>
                 <div className="bg-gray-700 p-4 rounded-lg text-center">
                   <p className="text-2xl font-bold text-green-400">{correctCount}</p>
                   <p className="text-sm text-gray-400">Correct Answers</p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {accuracy}% accuracy
-                  </p>
                 </div>
                 <div className="bg-gray-700 p-4 rounded-lg text-center">
-                  <p className="text-2xl font-bold text-yellow-400">
-                    {students.length > 0 ? Math.round((totalResponses / students.length) * 100) : 0}%
-                  </p>
-                  <p className="text-sm text-gray-400">Participation</p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {totalResponses}/{students.length} responded
-                  </p>
+                  <p className="text-2xl font-bold text-yellow-400">{accuracy}%</p>
+                  <p className="text-sm text-gray-400">Accuracy</p>
                 </div>
               </div>
             
               <div>
-                <h4 className="font-medium mb-3 flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4" />
-                  Response Breakdown
-                </h4>
+                <h4 className="font-medium mb-3">Response Breakdown</h4>
                 <div className="space-y-2">
                   {activeQuiz.options.map((option, index) => {
                     const optionCount = quizResponses.filter(r => r.selectedOption === index).length;
@@ -2723,24 +2026,13 @@ useEffect(() => {
               </div>
                 
               <div>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="font-medium flex items-center gap-2">
-                    <Users className="w-4 h-4" />
-                    Student Responses ({quizResponses.length})
-                  </h4>
-                  {quizResponses.length === 0 && (
-                    <Badge variant="outline" className="text-orange-400 border-orange-400">
-                      Waiting for responses...
-                    </Badge>
-                  )}
-                </div>
-                
+                <h4 className="font-medium mb-3">Student Responses</h4>
                 {quizResponses.length > 0 ? (
-                  <div className="max-h-80 overflow-y-auto space-y-2 border border-gray-600 rounded-lg p-2">
+                  <div className="max-h-60 overflow-y-auto space-y-2 border border-gray-600 rounded-lg p-2">
                     {quizResponses.map((response) => (
                       <div 
                         key={response.id} 
-                        className={`flex items-center gap-3 p-3 rounded-lg transition-colors ${
+                        className={`flex items-center gap-3 p-3 rounded-lg ${
                           response.isCorrect ? 'bg-green-500/10' : 'bg-red-500/10'
                         }`}
                       >
@@ -2758,20 +2050,8 @@ useEffect(() => {
                               <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
                             )}
                           </div>
-                          <div className="flex items-center gap-2 text-xs text-gray-400 mt-1">
-                            <span>Selected: <strong>{activeQuiz.options[response.selectedOption]}</strong></span>
-                            <span>•</span>
-                            <span>
-                              {response.submittedAt ? new Date(response.submittedAt).toLocaleTimeString() : 'Unknown time'}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className={`text-sm font-medium ${response.isCorrect ? 'text-green-400' : 'text-red-400'}`}>
-                            {response.isCorrect ? 'Correct' : 'Incorrect'}
-                          </p>
                           <p className="text-xs text-gray-400">
-                            Option {response.selectedOption + 1}
+                            Selected: {activeQuiz.options[response.selectedOption]}
                           </p>
                         </div>
                       </div>
@@ -2779,61 +2059,28 @@ useEffect(() => {
                   </div>
                 ) : (
                   <div className="text-center py-8 bg-gray-700/50 rounded-lg border border-gray-600">
-                    <Users className="w-12 h-12 text-gray-500 mx-auto mb-3" />
                     <p className="text-gray-400">No responses yet</p>
-                    <p className="text-sm text-gray-500 mt-1">
-                      Waiting for students to submit their answers...
-                    </p>
                   </div>
                 )}
               </div>
-              
-              {quizResponses.length > 0 && (
-                <div className="bg-gray-700/50 p-4 rounded-lg border border-gray-600">
-                  <h5 className="font-medium mb-2 text-sm text-gray-300">Quick Stats</h5>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <span className="text-gray-400">Fastest Response: </span>
-                      <span className="text-green-400">
-                        {quizResponses.length > 0 
-                          ? new Date(Math.min(...quizResponses.map(r => r.submittedAt?.getTime() || Date.now()))).toLocaleTimeString()
-                          : 'N/A'
-                        }
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-gray-400">Latest Response: </span>
-                      <span className="text-blue-400">
-                        {quizResponses.length > 0 
-                          ? new Date(Math.max(...quizResponses.map(r => r.submittedAt?.getTime() || Date.now()))).toLocaleTimeString()
-                          : 'N/A'
-                        }
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              )}
+      
+              <div className="flex gap-2">
+                <Button 
+                  variant="outline" 
+                  onClick={() => setShowResultsDialog(false)}
+                  className="flex-1"
+                >
+                  Close
+                </Button>
+                <Button 
+                  onClick={handleCloseQuiz}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700"
+                >
+                  Close Quiz
+                </Button>
+              </div>
             </div>
           )}
-      
-          <div className="flex-shrink-0 border-t border-gray-700 pt-4 mt-2">
-            <div className="flex gap-2">
-              <Button 
-                variant="outline" 
-                onClick={() => setShowResultsDialog(false)}
-                className="flex-1"
-              >
-                Close
-              </Button>
-              <Button 
-                onClick={handleCloseQuiz}
-                className="flex-1 bg-blue-600 hover:bg-blue-700"
-                disabled={quizResponses.length === 0}
-              >
-                {quizResponses.length === 0 ? 'No Responses Yet' : 'Close Quiz'}
-              </Button>
-            </div>
-          </div>
         </DialogContent>
       </Dialog>
     </div>

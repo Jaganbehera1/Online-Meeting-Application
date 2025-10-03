@@ -14,39 +14,37 @@ export class WebRTCManager {
     ]
   };
 
-async initializeLocalStream(audio: boolean = true, video: boolean = true): Promise<MediaStream> {
-  try {
-    console.log('Initializing local stream with audio:', audio, 'video:', video);
-    
-    // Validate that at least one media type is requested
-    if (!audio && !video) {
-      throw new Error('At least one of audio or video must be requested');
+  async initializeLocalStream(audio: boolean = true, video: boolean = true): Promise<MediaStream> {
+    try {
+      console.log('Initializing local stream with audio:', audio, 'video:', video);
+      
+      if (!audio && !video) {
+        throw new Error('At least one of audio or video must be requested');
+      }
+
+      const constraints: MediaStreamConstraints = {
+        video: video ? {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 }
+        } : false,
+        audio: audio ? {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 2
+        } : false
+      };
+
+      this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log('Local stream obtained:', this.localStream.id);
+      this.isInitialized = true;
+      return this.localStream;
+    } catch (error) {
+      console.error('Error accessing media devices:', error);
+      throw error;
     }
-
-    const constraints: MediaStreamConstraints = {
-      video: video ? {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 }
-      } : false,
-      audio: audio ? {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 2
-      } : false
-    };
-
-    this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
-    
-    console.log('Local stream obtained:', this.localStream.id);
-    this.isInitialized = true;
-    return this.localStream;
-  } catch (error) {
-    console.error('Error accessing media devices:', error);
-    throw error;
   }
-}
 
   createPeerConnection(studentId: string): RTCPeerConnection {
     console.log('Creating peer connection for:', studentId);
@@ -64,42 +62,35 @@ async initializeLocalStream(audio: boolean = true, video: boolean = true): Promi
     // Add local tracks to connection
     if (this.localStream) {
       this.localStream.getTracks().forEach(track => {
-        console.log('Adding track to peer connection:', track.kind, track.id);
         if (peerConnection.signalingState !== 'closed') {
-          peerConnection.addTrack(track, this.localStream!);
+          try {
+            peerConnection.addTrack(track, this.localStream!);
+            console.log('Added track to peer connection:', track.kind, track.id);
+          } catch (error) {
+            console.error('Error adding track:', error);
+          }
         }
       });
     }
 
     // Handle incoming remote tracks
     peerConnection.ontrack = (event) => {
-      console.log('Received remote track from:', studentId, event.streams);
-      const remoteStream = event.streams[0];
-      if (remoteStream) {
+      console.log('Received remote track from:', studentId, event.streams.length, 'streams');
+      if (event.streams && event.streams[0]) {
+        const remoteStream = event.streams[0];
         this.remoteStreams.set(studentId, remoteStream);
-        // Dispatch event for UI updates
+        
         window.dispatchEvent(new CustomEvent('remote-stream-added', {
           detail: { studentId, stream: remoteStream }
         }));
         
-        // Listen for track ended events
-        remoteStream.getTracks().forEach(track => {
-          track.onended = () => {
-            console.log('Remote track ended:', studentId, track.kind);
-            this.remoteStreams.delete(studentId);
-            window.dispatchEvent(new CustomEvent('remote-stream-removed', {
-              detail: { studentId }
-            }));
-          };
-        });
+        console.log('Remote stream added for:', studentId);
       }
     };
 
     // Handle ICE candidates
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log('Generated ICE candidate for:', studentId);
-        // Convert to plain object for Firebase
         const candidateData: RTCIceCandidateInit = {
           candidate: event.candidate.candidate,
           sdpMid: event.candidate.sdpMid || null,
@@ -107,20 +98,10 @@ async initializeLocalStream(audio: boolean = true, video: boolean = true): Promi
           usernameFragment: event.candidate.usernameFragment || null
         };
         
-        // Send candidate to signaling server (Firebase)
         window.dispatchEvent(new CustomEvent('ice-candidate', {
           detail: { studentId, candidate: candidateData }
         }));
-      } else {
-        console.log('ICE gathering complete for:', studentId);
       }
-    };
-
-    // Handle ICE connection state
-    peerConnection.oniceconnectionstatechange = () => {
-      const state = peerConnection.iceConnectionState;
-      console.log(`ICE connection state for ${studentId}:`, state);
-      this.connectionStates.set(studentId, state);
     };
 
     // Handle connection state changes
@@ -133,92 +114,79 @@ async initializeLocalStream(audio: boolean = true, video: boolean = true): Promi
         window.dispatchEvent(new CustomEvent('peer-connected', {
           detail: { studentId }
         }));
-      } else if (state === 'disconnected' || state === 'failed') {
+      } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+        window.dispatchEvent(new CustomEvent('peer-disconnected', {
+          detail: { studentId }
+        }));
+        this.remoteStreams.delete(studentId);
+      }
+    };
+
+    // Handle ICE connection state
+    peerConnection.oniceconnectionstatechange = () => {
+      const state = peerConnection.iceConnectionState;
+      console.log(`ICE connection state for ${studentId}:`, state);
+      
+      if (state === 'disconnected' || state === 'failed') {
         window.dispatchEvent(new CustomEvent('peer-disconnected', {
           detail: { studentId }
         }));
       }
     };
 
-    // Handle signaling state
-    peerConnection.onsignalingstatechange = () => {
-      console.log(`Signaling state for ${studentId}:`, peerConnection.signalingState);
-    };
-
     this.peerConnections.set(studentId, peerConnection);
     return peerConnection;
   }
 
-// In WebRTCManager.ts - enhance the createOffer method
-async createOffer(studentId: string): Promise<RTCSessionDescriptionInit> {
-  console.log('Creating offer for:', studentId);
-  
-  // Ensure any existing connection is properly closed
-  if (this.peerConnections.has(studentId)) {
-    const existingPC = this.peerConnections.get(studentId);
-    if (existingPC && existingPC.signalingState !== 'closed') {
-      console.log('Closing existing connection before creating new offer');
+  async createOffer(studentId: string): Promise<RTCSessionDescriptionInit> {
+    console.log('Creating offer for:', studentId);
+    
+    // Clean up any existing connection
+    if (this.peerConnections.has(studentId)) {
       this.closeConnection(studentId);
-      // Small delay to ensure cleanup
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-  }
-  
-  const peerConnection = this.createPeerConnection(studentId);
-  
-  try {
-    const offer = await peerConnection.createOffer({
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: true
-    });
     
-    await peerConnection.setLocalDescription(offer);
-    console.log('Offer created successfully, signaling state:', peerConnection.signalingState);
-    return offer;
-  } catch (error) {
-    console.error('Error creating offer:', error);
-    // Clean up on failure
-    this.closeConnection(studentId);
-    throw error;
-  }
-}
-
-// Add this method to check connection health
-checkConnectionHealth(studentId: string): boolean {
-  const pc = this.peerConnections.get(studentId);
-  if (!pc) return false;
-  
-  const connectionState = pc.connectionState;
-  const iceState = pc.iceConnectionState;
-  
-  return connectionState === 'connected' && 
-         (iceState === 'connected' || iceState === 'completed');
-}
-
-// In WebRTCManager.ts - Update the handleAnswer method
-async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promise<void> {
-  console.log('Handling answer from:', studentId);
-  const peerConnection = this.peerConnections.get(studentId);
-  
-  if (!peerConnection) {
-    console.error('No peer connection found for:', studentId);
-    throw new Error('No peer connection found');
+    const peerConnection = this.createPeerConnection(studentId);
+    
+    try {
+      const offer = await peerConnection.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true
+      });
+      
+      await peerConnection.setLocalDescription(offer);
+      console.log('Offer created successfully, signaling state:', peerConnection.signalingState);
+      return offer;
+    } catch (error) {
+      console.error('Error creating offer:', error);
+      this.closeConnection(studentId);
+      throw error;
+    }
   }
 
-  // Check if we're in the right state to handle an answer
-  if (peerConnection.signalingState !== 'have-local-offer') {
-    console.warn(`Wrong signaling state for answer: ${peerConnection.signalingState}, expected: have-local-offer. Skipping duplicate answer.`);
-    return; // Just return silently for duplicate answers
-  }
+  async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promise<void> {
+    console.log('Handling answer from:', studentId);
+    const peerConnection = this.peerConnections.get(studentId);
+    
+    if (!peerConnection) {
+      console.error('No peer connection found for:', studentId);
+      throw new Error('No peer connection found');
+    }
 
-  try {
-    await peerConnection.setRemoteDescription(answer);
-    console.log('Answer set as remote description successfully');
+    // Check if we're in the right state to handle an answer
+    const signalingState = peerConnection.signalingState;
+    if (signalingState !== 'have-local-offer') {
+      console.warn(`Cannot handle answer in state: ${signalingState}, expected: have-local-offer`);
+      return;
+    }
 
-    // Process any pending ICE candidates
-    const pending = this.pendingCandidates.get(studentId) || [];
-    if (pending.length > 0) {
-      console.log(`Processing ${pending.length} pending ICE candidates for:`, studentId);
+    try {
+      await peerConnection.setRemoteDescription(answer);
+      console.log('Answer set as remote description successfully');
+
+      // Process pending ICE candidates
+      const pending = this.pendingCandidates.get(studentId) || [];
       for (const candidate of pending) {
         try {
           await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
@@ -227,20 +195,25 @@ async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promis
         }
       }
       this.pendingCandidates.set(studentId, []);
+    } catch (error) {
+      console.error('Error handling answer:', error);
+      if ((error as Error).name === 'InvalidStateError') {
+        console.warn('Duplicate answer received, ignoring...');
+        return;
+      }
+      throw error;
     }
-  } catch (error) {
-    console.error('Error handling answer:', error);
-    // Don't throw for duplicate answers, just log
-    if ((error as Error).name === 'InvalidStateError') {
-      console.warn('Duplicate answer received, ignoring...');
-      return;
-    }
-    throw error;
   }
-}
 
   async handleOffer(studentId: string, offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
     console.log('Handling offer from:', studentId);
+    
+    // Clean up any existing connection
+    if (this.peerConnections.has(studentId)) {
+      this.closeConnection(studentId);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
     const peerConnection = this.createPeerConnection(studentId);
     
     try {
@@ -253,6 +226,7 @@ async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promis
       return answer;
     } catch (error) {
       console.error('Error handling offer:', error);
+      this.closeConnection(studentId);
       throw error;
     }
   }
@@ -260,12 +234,6 @@ async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promis
   async addIceCandidate(studentId: string, candidateData: RTCIceCandidateInit): Promise<void> {
     const peerConnection = this.peerConnections.get(studentId);
     if (!peerConnection) {
-      console.error('No peer connection found for ICE candidate:', studentId);
-      return;
-    }
-
-    // If remote description isn't set yet, store the candidate for later
-    if (!peerConnection.remoteDescription) {
       console.log('Storing ICE candidate for later processing:', studentId);
       const pending = this.pendingCandidates.get(studentId) || [];
       pending.push(candidateData);
@@ -279,7 +247,7 @@ async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promis
       console.log('ICE candidate added for:', studentId);
     } catch (error) {
       console.error('Error adding ICE candidate:', error);
-      // Still store it for potential later use
+      // Store for potential later use
       const pending = this.pendingCandidates.get(studentId) || [];
       pending.push(candidateData);
       this.pendingCandidates.set(studentId, pending);
@@ -298,23 +266,23 @@ async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promis
     console.log('Closing connection for:', studentId);
     const peerConnection = this.peerConnections.get(studentId);
     if (peerConnection) {
-      peerConnection.close();
+      try {
+        peerConnection.close();
+      } catch (error) {
+        console.error('Error closing connection:', error);
+      }
       this.peerConnections.delete(studentId);
-      this.remoteStreams.delete(studentId);
-      this.connectionStates.delete(studentId);
-      this.pendingCandidates.delete(studentId);
     }
+    this.remoteStreams.delete(studentId);
+    this.connectionStates.delete(studentId);
+    this.pendingCandidates.delete(studentId);
   }
 
   closeAllConnections(): void {
     console.log('Closing all peer connections');
-    this.peerConnections.forEach((connection) => {
-      connection.close();
+    this.peerConnections.forEach((_connection, studentId) => {
+      this.closeConnection(studentId);
     });
-    this.peerConnections.clear();
-    this.remoteStreams.clear();
-    this.connectionStates.clear();
-    this.pendingCandidates.clear();
   }
 
   stopLocalStream(): void {
@@ -322,7 +290,6 @@ async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promis
     if (this.localStream) {
       this.localStream.getTracks().forEach(track => {
         track.stop();
-        console.log('Stopped track:', track.kind, track.id);
       });
       this.localStream = null;
     }
@@ -349,7 +316,6 @@ async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promis
     return Array.from(this.peerConnections.keys());
   }
 
-  // Update stream tracks when toggling audio/video
   updateLocalStreamTracks(audioEnabled: boolean, videoEnabled: boolean): void {
     if (this.localStream) {
       this.localStream.getAudioTracks().forEach(track => {
@@ -361,9 +327,17 @@ async handleAnswer(studentId: string, answer: RTCSessionDescriptionInit): Promis
     }
   }
 
-  // Check if connection exists and is valid
   hasConnection(studentId: string): boolean {
     const pc = this.peerConnections.get(studentId);
-    return pc != null && pc.signalingState !== 'closed';
+    return pc != null && pc.connectionState !== 'closed' && pc.signalingState !== 'closed';
+  }
+
+  // New method to check if connection is healthy
+  isConnectionHealthy(studentId: string): boolean {
+    const pc = this.peerConnections.get(studentId);
+    if (!pc) return false;
+    
+    return pc.connectionState === 'connected' && 
+           (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed');
   }
 }
